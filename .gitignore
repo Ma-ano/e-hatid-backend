@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
