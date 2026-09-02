@@ -17,7 +17,7 @@ function cookieOptions(): { httpOnly: boolean; secure: boolean; sameSite: boolea
   return {
     httpOnly: true,
     secure: env.isProduction,
-    sameSite: "lax",
+    sameSite: env.isProduction ? "none" : "lax",
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   };
@@ -39,7 +39,7 @@ export function setAuthCookie(res: Response, token: string): void {
 }
 
 export function clearAuthCookie(res: Response): void {
-  res.clearCookie(AUTH_COOKIE, { path: "/", httpOnly: true, sameSite: "lax", secure: env.isProduction });
+  res.clearCookie(AUTH_COOKIE, { path: "/", httpOnly: true, sameSite: env.isProduction ? "none" : "lax", secure: env.isProduction });
 }
 
 export function csrfToken(): string {
@@ -58,7 +58,7 @@ export function setCsrfCookie(res: Response): void {
   res.cookie(CSRF_COOKIE, getServerCsrf(), {
     httpOnly: false,
     secure: env.isProduction,
-    sameSite: "lax",
+    sameSite: env.isProduction ? "none" : "lax",
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
