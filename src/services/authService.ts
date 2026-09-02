@@ -13,11 +13,14 @@ export const AUTH_COOKIE = "ehatid_token";
 export const CSRF_COOKIE = "ehatid_csrf";
 export const CSRF_HEADER = "x-csrf-token";
 
+/** true when frontend and backend are on different origins (e.g. Vercel + Render). */
+const isCrossOrigin = !env.clientOrigin.includes("localhost");
+
 function cookieOptions(): { httpOnly: boolean; secure: boolean; sameSite: boolean | "lax" | "strict" | "none"; path: string; maxAge: number } {
   return {
     httpOnly: true,
-    secure: env.isProduction,
-    sameSite: env.isProduction ? "none" : "lax",
+    secure: isCrossOrigin,
+    sameSite: isCrossOrigin ? "none" : "lax",
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   };
@@ -39,7 +42,7 @@ export function setAuthCookie(res: Response, token: string): void {
 }
 
 export function clearAuthCookie(res: Response): void {
-  res.clearCookie(AUTH_COOKIE, { path: "/", httpOnly: true, sameSite: env.isProduction ? "none" : "lax", secure: env.isProduction });
+  res.clearCookie(AUTH_COOKIE, { path: "/", httpOnly: true, sameSite: isCrossOrigin ? "none" : "lax", secure: isCrossOrigin });
 }
 
 export function csrfToken(): string {
@@ -57,8 +60,8 @@ export function getServerCsrf(): string {
 export function setCsrfCookie(res: Response): void {
   res.cookie(CSRF_COOKIE, getServerCsrf(), {
     httpOnly: false,
-    secure: env.isProduction,
-    sameSite: env.isProduction ? "none" : "lax",
+    secure: isCrossOrigin,
+    sameSite: isCrossOrigin ? "none" : "lax",
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
