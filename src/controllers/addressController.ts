@@ -127,6 +127,7 @@ export async function createAddress(req: Request, res: Response): Promise<void> 
         },
       },
     ],
+    { updatePipeline: true },
   );
 
   if (result.modifiedCount === 0) {
