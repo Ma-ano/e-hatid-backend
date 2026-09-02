@@ -11,6 +11,7 @@ export async function pushNotification(
   message: string,
   type: Notification["type"] = "info",
   orderId?: string,
+  link?: string,
 ): Promise<void> {
   await NotificationModel.create({
     userId: recipient.userId ?? null,
@@ -20,5 +21,6 @@ export async function pushNotification(
     type,
     read: false,
     orderId: orderId ?? null,
+    link: link ?? "",
   });
 }

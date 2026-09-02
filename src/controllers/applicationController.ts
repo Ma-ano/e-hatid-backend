@@ -2,6 +2,8 @@ import type { Request, Response } from "express";
 import { HttpError } from "../middlewares/errorHandler.js";
 import { ApplicationModel } from "../models/application.js";
 import { UserModel } from "../models/user.js";
+import { logAudit } from "../services/auditLogService.js";
+import { pushNotification } from "../services/notificationService.js";
 
 interface AuthUser {
   sub: string;
@@ -71,6 +73,18 @@ export async function reviewApplication(req: Request, res: Response): Promise<vo
     rejectionReason: decision === "rejected" && typeof rejectionReason === "string" ? rejectionReason : "",
   });
 
+  await logAudit(req, {
+    category: "application",
+    action: `application.${decision}`,
+    targetType: "Application",
+    targetId: String(id),
+    meta: {
+      role: application.role,
+      applicantUserId: application.userId,
+      rejectionReason: typeof rejectionReason === "string" ? rejectionReason : "",
+    },
+  });
+
   // If approved, add the role to the applicant's user account.
   if (decision === "approved") {
     const applicant = await UserModel.findById(application.userId).lean();
@@ -81,6 +95,34 @@ export async function reviewApplication(req: Request, res: Response): Promise<vo
       const newRoles = roles.includes(application.role) ? roles : [...roles, application.role];
       await UserModel.findByIdAndUpdate(application.userId, { roles: newRoles, roleStatus });
     }
+  }
+
+  // Notify the applicant so the outcome is visible in their notification center.
+  try {
+    const roleLabel = application.role === "vendor" ? "Vendor" : "Rider";
+    if (decision === "approved") {
+      await pushNotification(
+        { userId: application.userId },
+        `${roleLabel} Application Approved — you can now access the ${roleLabel.toLowerCase()} dashboard.`,
+        "success",
+        undefined,
+        application.role === "vendor" ? "/vendor" : "/rider",
+      );
+    } else {
+      const reason =
+        typeof rejectionReason === "string" && rejectionReason.trim() !== ""
+          ? ` Reason: ${rejectionReason.trim()}`
+          : "";
+      await pushNotification(
+        { userId: application.userId },
+        `Your ${roleLabel} application was not approved.${reason}`,
+        "warning",
+        undefined,
+        application.role === "vendor" ? "/become-vendor" : "/become-rider",
+      );
+    }
+  } catch (err) {
+    console.warn("[applications] notification push failed:", err);
   }
 
   const updated = await ApplicationModel.findById(id).lean();

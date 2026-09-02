@@ -67,7 +67,7 @@ const stallSchema = new Schema(
     isNew: { type: Boolean, default: false },
     menu: { type: [menuItemSchema], default: [] },
   },
-  { timestamps: true, versionKey: false },
+  { timestamps: true, versionKey: false, suppressReservedKeysWarning: true },
 );
 
 export type Stall = InferSchemaType<typeof stallSchema>;

@@ -25,7 +25,6 @@ const promoSchema = new Schema(
   { timestamps: true, versionKey: false },
 );
 
-promoSchema.index({ code: 1 }, { unique: true });
 promoSchema.index({ active: 1, startsAt: 1, expiresAt: 1 });
 
 export type Promo = InferSchemaType<typeof promoSchema>;

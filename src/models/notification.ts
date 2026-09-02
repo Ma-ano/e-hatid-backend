@@ -11,6 +11,8 @@ const notificationSchema = new Schema(
     type: { type: String, enum: NOTIFICATION_TYPES, default: "info" },
     read: { type: Boolean, default: false },
     orderId: { type: String, default: null, index: true },
+    // Optional deep-link target (e.g. "/vendor", "/become-vendor").
+    link: { type: String, default: "" },
   },
   { timestamps: true, versionKey: false },
 );

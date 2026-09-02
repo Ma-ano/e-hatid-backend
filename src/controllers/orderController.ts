@@ -8,6 +8,8 @@ import { estimateDeliveryFee } from "../services/deliveryFeeService.js";
 import { validatePromo } from "../services/promoService.js";
 import { PromoModel } from "../models/promo.js";
 import { pushNotification } from "../services/notificationService.js";
+import { logAudit } from "../services/auditLogService.js";
+import { getIO } from "../socket.js";
 
 interface AuthUser {
   sub: string;
@@ -40,6 +42,7 @@ export async function createOrder(req: Request, res: Response): Promise<void> {
     stallId?: unknown;
     items?: unknown;
     deliveryAddress?: unknown;
+    deliveryLocation?: unknown;
     distance?: unknown;
     customerLatitude?: unknown;
     customerLongitude?: unknown;
@@ -58,6 +61,9 @@ const stall = await StallModel.findById(stallId).lean();
 
   const orderUser = await UserModel.findById(user.sub).lean();
   if (!orderUser) throw new HttpError(404, "User not found");
+  if (!orderUser.emailVerified) {
+    throw new HttpError(403, "Please verify your email before placing an order.");
+  }
 
   interface IncomingItem {
     menuItemId?: unknown;
@@ -143,15 +149,47 @@ const stall = await StallModel.findById(stallId).lean();
 
   const toNullableNumber = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) ? v : null;
-  const toNumber = (v: unknown): number => (typeof v === "number" ? v : 0);
+
+  // Parse deliveryLocation from the request body (prompt1.md spec)
+  const rawDeliveryLocation = body.deliveryLocation;
+  let deliveryLocation = null;
+  let deliveryInstructionsFromLocation = "";
+  if (rawDeliveryLocation && typeof rawDeliveryLocation === "object" && !Array.isArray(rawDeliveryLocation)) {
+    const dlObj = rawDeliveryLocation as Record<string, unknown>;
+    const fullAddress = typeof dlObj.fullAddress === "string" ? dlObj.fullAddress.trim() : "";
+    const instructions = typeof dlObj.deliveryInstructions === "string" ? dlObj.deliveryInstructions.trim() : "";
+    deliveryInstructionsFromLocation = instructions;
+
+    let locationGeo = null;
+    const rawLoc = dlObj.location;
+    if (rawLoc && typeof rawLoc === "object" && !Array.isArray(rawLoc)) {
+      const locObj = rawLoc as Record<string, unknown>;
+      const coords = locObj.coordinates;
+      if (Array.isArray(coords) && coords.length === 2) {
+        const lng = Number(coords[0]);
+        const lat = Number(coords[1]);
+        if (Number.isFinite(lng) && Number.isFinite(lat) && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90) {
+          locationGeo = { type: "Point", coordinates: [lng, lat] };
+        }
+      }
+    }
+
+    deliveryLocation = {
+      fullAddress,
+      location: locationGeo,
+      deliveryInstructions: instructions,
+    };
+  }
 
   const customerLat = toNullableNumber(body.customerLatitude);
   const customerLng = toNullableNumber(body.customerLongitude);
 
   // Compute the delivery fee through the fee engine (geo service + config).
-  // If coordinates are missing, fall back to the stall's flat delivery fee.
+  // The client-sent `distance` is deliberately ignored (prompt1.md §34): a
+  // tampered value would directly shrink the fare. Distance is always derived
+  // from the authoritative stall/customer coordinates.
   let deliveryFee = Number(stall.deliveryFee ?? 0);
-  let distance = toNumber(body.distance);
+  let distance = 0;
   let serviceFee = 1.49;
 
   const hasCoords = customerLat != null && customerLng != null && stall.latitude != null && stall.longitude != null;
@@ -163,7 +201,6 @@ const stall = await StallModel.findById(stallId).lean();
       dropLat: customerLat as number,
       dropLng: customerLng as number,
     };
-    if (distance > 0) feeInput.distanceKm = distance;
     const estimate = await estimateDeliveryFee(feeInput);
     deliveryFee = estimate.deliveryFee;
     distance = estimate.distanceKm;
@@ -188,6 +225,23 @@ const stall = await StallModel.findById(stallId).lean();
   // any other value is rejected so unsupported methods can never be recorded.
   const paymentMethod = body.paymentMethod === "cod" ? "cod" : "cod";
 
+  // Idempotency: if the client retries a request (e.g. after a dropped response),
+  // serve the same order instead of creating a duplicate.
+  const idempotencyKey = (req.headers["x-idempotency-key"] as string | undefined) ?? "";
+  if (idempotencyKey !== "") {
+    const existing = await OrderModel.findOne({ userId: user.sub, idempotencyKey }).lean();
+    if (existing) {
+      res.status(200).json({ data: existing, message: "Order already exists for this request" });
+      return;
+    }
+  }
+
+  // Estimated delivery window (minutes), derived from the authoritative distance.
+  const ETA_BASE_MIN = 20;
+  const ETA_PER_KM_MIN = 4;
+  const etaMinutes = distance > 0 ? Math.round(ETA_BASE_MIN + distance * ETA_PER_KM_MIN) : ETA_BASE_MIN;
+  const estimatedDeliveryTime = `${etaMinutes}-${Math.min(etaMinutes + 10, 90)} min`;
+
   const order = await OrderModel.create({
     userId: user.sub,
     stallId: String(stall._id),
@@ -204,14 +258,18 @@ const stall = await StallModel.findById(stallId).lean();
     total: Math.round((subtotal + deliveryFee + serviceFee - discount) * 100) / 100,
     paymentMethod,
     paymentStatus: "unpaid",
-    deliveryAddress: typeof body.deliveryAddress === "string" ? body.deliveryAddress : "",
+    deliveryLocation,
+    deliveryAddress: deliveryLocation?.fullAddress || (typeof body.deliveryAddress === "string" ? body.deliveryAddress : ""),
+    deliveryInstructions: deliveryInstructionsFromLocation || "",
     notes: typeof body.notes === "string" ? body.notes : "",
     distance,
+    estimatedDeliveryTime,
     customerLatitude: customerLat,
     customerLongitude: customerLng,
     stallLatitude: stall.latitude ?? null,
     stallLongitude: stall.longitude ?? null,
     status: "pending",
+    idempotencyKey,
   });
 
   // Track promo redemption.
@@ -410,7 +468,29 @@ export async function updateOrderStatus(req: Request, res: Response): Promise<vo
   if (next === "ready" || next === "ready_for_pickup") update.readyAt = new Date();
   if (next === "delivering") update.pickedUpAt = new Date();
 
-  const updated = await OrderModel.findByIdAndUpdate(id, update, { new: true }).lean();
+  // Atomic transition: gate the update on the current status so two actors can
+  // never double-claim or double-accept the same order (spec §5, §27).
+  const claimFilter: Record<string, unknown> = { _id: id, status: order.status };
+  if (actor === "rider-claim") {
+    claimFilter.riderId = { $in: [null, ""] };
+  }
+  const updated = await OrderModel.findOneAndUpdate(claimFilter, { $set: update }, { new: true }).lean();
+  if (!updated) {
+    throw new HttpError(409, "This order was just updated by someone else. Please refresh and try again.");
+  }
+
+  await logAudit(req, {
+    category: "order",
+    action: `order.status.${next}`,
+    targetType: "Order",
+    targetId: String(id),
+    meta: {
+      from: order.status,
+      to: next,
+      actor,
+      cancelledReason: typeof cancelledReason === "string" ? cancelledReason : "",
+    },
+  });
 
   // Push role-scoped notifications for the other party.
   const shortId = String(id).slice(-6).toUpperCase();
@@ -426,6 +506,17 @@ export async function updateOrderStatus(req: Request, res: Response): Promise<vo
     }
   } catch (err) {
     console.warn("[orders] notification push failed:", err);
+  }
+
+  // Emit real-time socket event for live tracking.
+  try {
+    getIO().to(`order:${id}`).emit("order:status", {
+      ...updated,
+      orderId: id,
+      status: next,
+    });
+  } catch {
+    // socket not critical; ignore emit failures
   }
 
   res.status(200).json({ data: updated });

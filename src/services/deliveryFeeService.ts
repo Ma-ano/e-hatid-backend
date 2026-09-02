@@ -21,7 +21,7 @@ export interface DeliveryFeeInput {
   dropLng?: number | null;
 }
 
-const SERVICE_FEE = 1.49;
+export const SERVICE_FEE = 1.49;
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;

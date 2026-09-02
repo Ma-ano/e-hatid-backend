@@ -47,33 +47,46 @@ export async function requestOtp(req: Request, res: Response): Promise<void> {
     insecure: purpose === "demo" || normalized === "rider@ehatid.com",
   });
 
+  // In non-production, demo requests also get the code echoed back on-screen so
+  // local testing doesn't depend on inbox delivery. In production insecure mode
+  // is disabled inside the issuer, so this can never leak a real code.
+  const echoDemo = result.expiredInsecure === true;
+
   res.status(200).json({
     data: {
       email: normalized,
       expiresIn: 300,
-      // Only echo the code when there is no email provider to deliver it (dev/demo fallback).
-      demoOtp: !smtpConfigured && result.expiredInsecure ? result.otp : undefined,
+      demoOtp: echoDemo ? result.otp : undefined,
     },
-    message: `Verification code sent${!smtpConfigured && result.expiredInsecure ? " (demo mode: echoed below)" : ""}`,
+    message: `Verification code sent${echoDemo ? " (demo mode: code shown below)" : ""}`,
   });
 }
 
-/** Verify a submitted OTP and mark the email as verified for the current user. */
+/** Verify a submitted OTP and mark the signed-in account's email as verified. */
 export async function verifyOtp(req: Request, res: Response): Promise<void> {
-  const { email, otp } = req.body as { email?: unknown; otp?: unknown };
-  if (typeof email !== "string" || email.trim() === "") {
-    throw new HttpError(400, "email is required");
+  // The code can only ever verify the logged-in account's own email — never an
+  // arbitrary address supplied by the client.
+  const authReq = req as Request & { user?: { sub: string; email?: string } };
+  if (!authReq.user?.sub) {
+    throw new HttpError(401, "Authentication required");
   }
+
+  const { otp } = req.body as { email?: unknown; otp?: unknown };
   if (typeof otp !== "string" || otp.trim() === "") {
     throw new HttpError(400, "otp is required");
   }
 
-  const result = await issuer.verify(email, otp);
-
-  const authReq = req as Request & { user?: { sub: string } };
-  if (authReq.user?.sub) {
-    await UserModel.findByIdAndUpdate(authReq.user.sub, { emailVerified: true });
+  // The JWT doesn't carry the address, so resolve the signed-in account's
+  // email from the database — the code must match it, never a client-supplied one.
+  const account = await UserModel.findById(authReq.user.sub).lean();
+  const accountEmail = account?.email;
+  if (!accountEmail) {
+    throw new HttpError(401, "Account not found. Please sign in again.");
   }
+
+  const result = await issuer.verify(accountEmail, otp);
+
+  await UserModel.findByIdAndUpdate(authReq.user.sub, { emailVerified: true });
 
   res.status(200).json({
     data: { email: result.email, verified: true, suspicious: result.suspicious },

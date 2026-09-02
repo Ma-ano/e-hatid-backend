@@ -27,21 +27,25 @@ const userSchema = new Schema(
     addressZip: { type: String, default: "" },
     address: { type: String, default: "" },
 
-    // Address book (spec §25)
+    // Address book (prompt1.md spec)
     addresses: {
       type: [
         new Schema(
           {
             id: { type: String, required: true },
             label: { type: String, default: "" },
-            street: { type: String, default: "" },
-            barangay: { type: String, default: "" },
-            city: { type: String, default: "" },
-            province: { type: String, default: "" },
-            zip: { type: String, default: "" },
-            address: { type: String, default: "" },
-            latitude: { type: Number, default: null },
-            longitude: { type: Number, default: null },
+            fullAddress: { type: String, default: "" },
+            location: {
+              type: new Schema(
+                {
+                  type: { type: String, default: "Point" },
+                  coordinates: { type: [Number], default: [0, 0] },
+                },
+                { _id: false },
+              ),
+              default: null,
+            },
+            deliveryInstructions: { type: String, default: "" },
             isDefault: { type: Boolean, default: false },
           },
           { _id: false },

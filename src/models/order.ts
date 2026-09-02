@@ -54,6 +54,27 @@ const orderSchema = new Schema(
 
     distance: { type: Number, default: 0 },
     deliveryAddress: { type: String, default: "" },
+    deliveryLocation: {
+      type: new Schema(
+        {
+          fullAddress: { type: String, default: "" },
+          location: {
+            type: new Schema(
+              {
+                type: { type: String, default: "Point" },
+                coordinates: { type: [Number], default: [0, 0] },
+              },
+              { _id: false },
+            ),
+            default: null,
+          },
+          deliveryInstructions: { type: String, default: "" },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
+    deliveryInstructions: { type: String, default: "" },
 
     customerLatitude: { type: Number, default: null },
     customerLongitude: { type: Number, default: null },
@@ -81,6 +102,9 @@ const orderSchema = new Schema(
     acceptedAt: { type: Date, default: null },
     readyAt: { type: Date, default: null },
     pickedUpAt: { type: Date, default: null },
+
+    // Idempotency: POST /orders can be retried safely with the same key.
+    idempotencyKey: { type: String, default: "", index: true },
   },
   { timestamps: true, versionKey: false },
 );
@@ -89,6 +113,7 @@ orderSchema.index({ userId: 1, createdAt: -1 });
 orderSchema.index({ vendorId: 1, createdAt: -1 });
 orderSchema.index({ riderId: 1, createdAt: -1 });
 orderSchema.index({ status: 1, createdAt: -1 });
+orderSchema.index({ userId: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string", $ne: "" } } });
 
 export type Order = InferSchemaType<typeof orderSchema>;
 export type OrderItem = InferSchemaType<typeof orderItemSchema>;

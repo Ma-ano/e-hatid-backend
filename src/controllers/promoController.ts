@@ -4,6 +4,7 @@ import { HttpError } from "../middlewares/errorHandler.js";
 import { PromoModel, type PromoType } from "../models/promo.js";
 import { UserModel } from "../models/user.js";
 import { previewPromo } from "../services/promoService.js";
+import { logAudit } from "../services/auditLogService.js";
 
 interface AuthUser {
   sub: string;
@@ -120,6 +121,13 @@ export async function createPromo(req: Request, res: Response): Promise<void> {
     active: body.active !== false,
     description: typeof body.description === "string" ? body.description : "",
   });
+  await logAudit(req, {
+    category: "promo",
+    action: "promo.created",
+    targetType: "Promo",
+    targetId: String(promo._id),
+    meta: { code },
+  });
   res.status(201).json({ data: promo });
 }
 
@@ -160,6 +168,13 @@ export async function updatePromo(req: Request, res: Response): Promise<void> {
 
   const promo = await PromoModel.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
   if (!promo) throw new HttpError(404, "Promo not found");
+  await logAudit(req, {
+    category: "promo",
+    action: "promo.updated",
+    targetType: "Promo",
+    targetId: String(id),
+    meta: { update },
+  });
   res.status(200).json({ data: promo });
 }
 
@@ -170,5 +185,12 @@ export async function deletePromo(req: Request, res: Response): Promise<void> {
   if (!isValidObjectId(id)) throw new HttpError(400, "Invalid promo id");
   const promo = await PromoModel.findByIdAndDelete(id).lean();
   if (!promo) throw new HttpError(404, "Promo not found");
+  await logAudit(req, {
+    category: "promo",
+    action: "promo.deleted",
+    targetType: "Promo",
+    targetId: String(id),
+    meta: { code: promo.code },
+  });
   res.status(200).json({ data: { success: true } });
 }

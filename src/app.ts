@@ -1,5 +1,11 @@
 import express from "express";
 import cookieParser from "cookie-parser";
+// Express 4 does not catch rejected promises from async handlers — a thrown
+// HttpError (e.g. failed login) becomes an unhandled rejection that kills the
+// whole process (Node >=15 default). Importing this patches every router so
+// rejections flow to errorHandler instead; one bad request can never take the
+// backend down again.
+import "express-async-errors";
 
 import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler.js";

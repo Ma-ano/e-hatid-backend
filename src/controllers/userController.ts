@@ -3,6 +3,7 @@ import { HttpError } from "../middlewares/errorHandler.js";
 import { UserModel } from "../models/user.js";
 import { toSafeUser } from "../services/userService.js";
 import { getDbUser, requireAuth } from "../middlewares/auth.js";
+import { logAudit } from "../services/auditLogService.js";
 
 const PROFILE_FIELDS = [
   "name",
@@ -135,6 +136,15 @@ export async function setRoleStatus(req: Request, res: Response): Promise<void> 
     { roleStatus, roles: newRoles },
     { new: true },
   ).lean();
+
+  await logAudit(req, {
+    category: "user",
+    action: `user.role.${status}`,
+    targetType: "User",
+    targetId: String(id),
+    meta: { role, previousRoles: roles, newRoles },
+  });
+
   res.status(200).json({ data: updated ? toSafeUser(updated) : null });
 }
 

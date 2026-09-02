@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { isValidObjectId } from "mongoose";
 import { HttpError } from "../middlewares/errorHandler.js";
 import { StallModel } from "../models/stall.js";
+import { logAudit } from "../services/auditLogService.js";
 
 interface StallInput {
   name?: unknown;
@@ -172,5 +173,12 @@ export async function deleteStall(req: Request, res: Response): Promise<void> {
   if (!stall) {
     throw new HttpError(404, "Stall not found");
   }
+  await logAudit(req, {
+    category: "stall",
+    action: "stall.deleted",
+    targetType: "Stall",
+    targetId: String(id),
+    meta: { name: stall.name },
+  });
   res.status(204).send();
 }
