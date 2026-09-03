@@ -15,7 +15,7 @@ function getUser(req: Request): AuthUser | undefined {
 
 const APPLICATION_FIELDS = {
   vendor: new Set(["stallName", "stallAddress", "cuisine", "about"]),
-  rider: new Set(["vehicle", "licensePlate", "licence", "about"]),
+  rider: new Set(["vehicle", "licensePlate", "licence", "about", "sourceLocationSlug"]),
 } as const;
 
 function sanitizeApplicationData(

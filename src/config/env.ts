@@ -75,6 +75,7 @@ export const env = {
   jwtSecret: readString("JWT_SECRET", "dev-insecure-secret-change-me"),
   jwtExpiresIn: readString("JWT_EXPIRES_IN", "7d"),
   clientOrigin: readString("CLIENT_ORIGIN", "http://localhost:5173"),
+  publicSiteUrl: readString("PUBLIC_SITE_URL", readString("CLIENT_ORIGIN", "http://localhost:5173")).replace(/\/$/, ""),
   isProduction: readString("NODE_ENV", "development") === "production",
   trustProxyHops: readNonNegativeInteger("TRUST_PROXY_HOPS", 0),
 
@@ -120,6 +121,15 @@ if (env.isProduction) {
   }
   if (origin.protocol !== "https:") {
     throw new Error("CLIENT_ORIGIN must use HTTPS in production");
+  }
+  let publicSiteUrl: URL;
+  try {
+    publicSiteUrl = new URL(env.publicSiteUrl);
+  } catch {
+    throw new Error("PUBLIC_SITE_URL must be a valid absolute URL in production");
+  }
+  if (publicSiteUrl.protocol !== "https:") {
+    throw new Error("PUBLIC_SITE_URL must use HTTPS in production");
   }
   if (!env.smtpHost || !env.smtpUser || !env.smtpPass || !env.smtpFrom) {
     throw new Error("SMTP_HOST, SMTP_USER, SMTP_PASS and SMTP_FROM are required in production");

@@ -11,6 +11,7 @@ import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler.js";
 import { env } from "./config/env.js";
 import { rejectUnsafeBody } from "./middlewares/requestValidation.js";
+import { seoRouter } from "./routes/seo.js";
 
 export function createApp(): express.Express {
   const app = express();
@@ -44,6 +45,7 @@ export function createApp(): express.Express {
     next();
   });
 
+  app.use(seoRouter);
   app.use("/api", apiRouter);
 
   app.use(notFoundHandler);

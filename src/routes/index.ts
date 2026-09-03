@@ -20,6 +20,8 @@ import { deliveryRouter } from "./delivery.js";
 import { auditLogsRouter } from "./auditLogs.js";
 import { geocodingRouter } from "./geocoding.js";
 import { loadUser } from "../middlewares/auth.js";
+import { locationsRouter } from "./locations.js";
+import { riderRecruitmentRouter } from "./riderRecruitment.js";
 
 export const apiRouter = Router();
 
@@ -32,6 +34,8 @@ apiRouter.use("/users", usersRouter);
 apiRouter.use("/stalls", stallsRouter);
 apiRouter.use("/orders", ordersRouter);
 apiRouter.use("/config", configRouter);
+apiRouter.use("/locations", locationsRouter);
+apiRouter.use("/rider-recruitment", riderRecruitmentRouter);
 apiRouter.use("/riders", ridersRouter);
 apiRouter.use("/otp", otpRouter);
 apiRouter.use("/reviews", reviewsRouter);

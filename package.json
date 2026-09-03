@@ -7,8 +7,11 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/tests/securityRoutes.test.js",
-    "seed": "tsx src/scripts/seed.ts"
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "seed": "tsx src/scripts/seed.ts",
+    "psgc:validate": "tsx src/scripts/syncPsgc.ts --dry-run",
+    "psgc:sync": "tsx src/scripts/syncPsgc.ts",
+    "psgc:report": "tsx src/scripts/reportPsgc.ts"
   },
   "license": "ISC",
   "description": "Rider App backend API (Node.js + Express + TypeScript)",
