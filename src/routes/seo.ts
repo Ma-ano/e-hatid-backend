@@ -15,7 +15,7 @@ const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function publicHeaders(res: Response, options?: { indexable?: boolean }): void {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+  res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self' 'sha256-CyAli5hxFdPn77k9SirZTbMGSL55oU2ky9gjJsfH+lo='; style-src 'unsafe-inline'; img-src https: data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("X-Robots-Tag", options?.indexable ? "index, follow" : "noindex, follow");
   res.setHeader("Cache-Control", options?.indexable

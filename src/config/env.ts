@@ -4,10 +4,18 @@ import { fileURLToPath } from "node:url";
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const projectRoot = path.resolve(backendRoot, "..");
+const requestedEnvFile = process.env.EHATID_ENV_FILE?.trim();
+const requestedEnvPath = requestedEnvFile
+  ? (path.isAbsolute(requestedEnvFile) ? requestedEnvFile : path.resolve(backendRoot, requestedEnvFile))
+  : "";
 
 dotenv.config({
-  path: [
+  // Local overrides are intentionally first because dotenv never replaces an
+  // already-defined key. Hosted environment variables still have top priority.
+  path: requestedEnvPath ? [requestedEnvPath] : [
+    path.join(backendRoot, ".env.local"),
     path.join(backendRoot, ".env"),
+    path.join(projectRoot, ".env.local"),
     path.join(projectRoot, ".env"),
     path.join(projectRoot, "atlas-credentials.env"),
   ],

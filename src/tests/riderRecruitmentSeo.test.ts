@@ -82,6 +82,7 @@ test("Cabanatuan SSR includes useful HTML, canonical metadata, FAQ JSON-LD, and 
   assert.match(html, /<meta name="robots" content="noindex,follow">/);
   assert.match(html, /"@type":"FAQPage"/);
   assert.doesNotMatch(html, /"@type":"JobPosting"/);
+  assert.match(html, /<script defer src="\/_vercel\/speed-insights\/script\.js"/);
 });
 
 test("active published recruitment emits JobPosting without inventing salary", () => {
