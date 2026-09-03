@@ -53,6 +53,9 @@ const stallSchema = new Schema(
     image: { type: String, default: "" },
     logo: { type: String, default: "" },
     rating: { type: Number, default: 0, min: 0, max: 5 },
+    prepTimeMin: { type: Number, default: 15, min: 1, max: 240 },
+    prepTimeMax: { type: Number, default: 25, min: 1, max: 240 },
+    // Kept for compatibility with stalls created before preparation time was split out.
     deliveryTime: { type: String, default: "" },
     deliveryFee: { type: Number, default: 0, min: 0 },
     minOrder: { type: Number, default: 0, min: 0 },

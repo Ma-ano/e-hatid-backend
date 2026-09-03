@@ -6,6 +6,7 @@ import type { Server } from "node:http";
 import { createApp } from "../app.js";
 import { AUTH_COOKIE, signToken } from "../services/authService.js";
 import { UserModel, type Role } from "../models/user.js";
+import { estimateDeliveryWindow } from "../services/deliveryFeeService.js";
 
 let server: Server;
 let baseUrl = "";
@@ -25,6 +26,26 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
+});
+
+test("delivery ETA combines vendor preparation with route-based rider travel", () => {
+  const estimate = estimateDeliveryWindow(5, { prepTimeMin: 15, prepTimeMax: 25 });
+  assert.deepEqual(estimate, {
+    preparationTimeMin: 15,
+    preparationTimeMax: 25,
+    travelTimeMin: 17,
+    travelTimeMax: 30,
+    totalTimeMin: 32,
+    totalTimeMax: 55,
+    estimatedDeliveryTime: "32-55 min",
+  });
+});
+
+test("delivery ETA supports legacy stall preparation strings", () => {
+  const estimate = estimateDeliveryWindow(0, { deliveryTime: "20 - 30" });
+  assert.equal(estimate.preparationTimeMin, 20);
+  assert.equal(estimate.preparationTimeMax, 30);
+  assert.equal(estimate.estimatedDeliveryTime, "30-50 min");
 });
 
 test("health remains public", async () => {

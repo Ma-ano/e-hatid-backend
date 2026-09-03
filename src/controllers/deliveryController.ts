@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import { HttpError } from "../middlewares/errorHandler.js";
 import { StallModel } from "../models/stall.js";
-import { estimateDeliveryFee, SERVICE_FEE } from "../services/deliveryFeeService.js";
+import { estimateDeliveryFee, estimateDeliveryWindow, SERVICE_FEE } from "../services/deliveryFeeService.js";
 
 interface EstimateResponse {
   estimated: boolean;
@@ -9,6 +9,13 @@ interface EstimateResponse {
   serviceFee: number;
   distanceKm: number;
   total: number;
+  preparationTimeMin: number;
+  preparationTimeMax: number;
+  travelTimeMin: number;
+  travelTimeMax: number;
+  totalTimeMin: number;
+  totalTimeMax: number;
+  estimatedDeliveryTime: string;
 }
 
 export async function estimateDelivery(req: Request, res: Response): Promise<void> {
@@ -54,21 +61,25 @@ export async function estimateDelivery(req: Request, res: Response): Promise<voi
       dropLat: customerLat as number,
       dropLng: customerLng as number,
     });
+    const window = estimateDeliveryWindow(estimate.distanceKm, stall);
     response = {
       estimated: true,
       deliveryFee: estimate.deliveryFee,
       serviceFee: estimate.serviceFee,
       distanceKm: estimate.distanceKm,
       total: estimate.total,
+      ...window,
     };
   } else {
     const flat = Number(stall.deliveryFee ?? 0);
+    const window = estimateDeliveryWindow(0, stall);
     response = {
       estimated: false,
       deliveryFee: flat,
       serviceFee,
       distanceKm: 0,
       total: Math.round((subtotal + flat + serviceFee) * 100) / 100,
+      ...window,
     };
   }
 

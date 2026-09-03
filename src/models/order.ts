@@ -105,6 +105,10 @@ const orderSchema = new Schema(
     paidAt: { type: Date, default: null },
 
     estimatedDeliveryTime: { type: String, default: "" },
+    preparationTimeMin: { type: Number, default: 0, min: 0 },
+    preparationTimeMax: { type: Number, default: 0, min: 0 },
+    travelTimeMin: { type: Number, default: 0, min: 0 },
+    travelTimeMax: { type: Number, default: 0, min: 0 },
     acceptedAt: { type: Date, default: null },
     readyAt: { type: Date, default: null },
     pickedUpAt: { type: Date, default: null },

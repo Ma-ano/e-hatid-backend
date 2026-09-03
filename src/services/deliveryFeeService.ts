@@ -21,7 +21,58 @@ export interface DeliveryFeeInput {
   dropLng?: number | null;
 }
 
+export interface DeliveryWindow {
+  preparationTimeMin: number;
+  preparationTimeMax: number;
+  travelTimeMin: number;
+  travelTimeMax: number;
+  totalTimeMin: number;
+  totalTimeMax: number;
+  estimatedDeliveryTime: string;
+}
+
+interface PreparationSource {
+  prepTimeMin?: number | null;
+  prepTimeMax?: number | null;
+  deliveryTime?: string | null;
+}
+
 export const SERVICE_FEE = 1.49;
+
+function preparationWindow(stall: PreparationSource): [number, number] {
+  const explicitMin = Number(stall.prepTimeMin);
+  const explicitMax = Number(stall.prepTimeMax);
+  if (Number.isFinite(explicitMin) && explicitMin >= 1 && Number.isFinite(explicitMax) && explicitMax >= explicitMin) {
+    return [Math.round(explicitMin), Math.round(explicitMax)];
+  }
+  const legacy = stall.deliveryTime?.match(/\d+/g)?.map(Number) ?? [];
+  const min = legacy[0] && legacy[0] > 0 ? legacy[0] : 15;
+  const max = legacy[1] && legacy[1] >= min ? legacy[1] : min + 10;
+  return [Math.round(min), Math.round(max)];
+}
+
+/**
+ * Approximate a rider travel window from route distance. The lower bound assumes
+ * normal urban motorcycle traffic; the upper bound adds slower traffic and a
+ * short pickup/dispatch buffer. Live rider GPS replaces this once dispatched.
+ */
+export function estimateDeliveryWindow(distanceKm: number, stall: PreparationSource): DeliveryWindow {
+  const distance = Number.isFinite(distanceKm) && distanceKm > 0 ? distanceKm : 0;
+  const [preparationTimeMin, preparationTimeMax] = preparationWindow(stall);
+  const travelTimeMin = distance > 0 ? Math.max(8, Math.ceil((distance / 25) * 60) + 5) : 10;
+  const travelTimeMax = distance > 0 ? Math.max(travelTimeMin + 5, Math.ceil((distance / 15) * 60) + 10) : 20;
+  const totalTimeMin = preparationTimeMin + travelTimeMin;
+  const totalTimeMax = preparationTimeMax + travelTimeMax;
+  return {
+    preparationTimeMin,
+    preparationTimeMax,
+    travelTimeMin,
+    travelTimeMax,
+    totalTimeMin,
+    totalTimeMax,
+    estimatedDeliveryTime: `${totalTimeMin}-${totalTimeMax} min`,
+  };
+}
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;

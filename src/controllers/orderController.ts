@@ -4,7 +4,7 @@ import { HttpError } from "../middlewares/errorHandler.js";
 import { OrderModel, type OrderStatus } from "../models/order.js";
 import { StallModel } from "../models/stall.js";
 import { UserModel } from "../models/user.js";
-import { estimateDeliveryFee } from "../services/deliveryFeeService.js";
+import { estimateDeliveryFee, estimateDeliveryWindow } from "../services/deliveryFeeService.js";
 import {
   releasePromoUse,
   reservePromoUse,
@@ -388,11 +388,9 @@ export async function createOrder(req: Request, res: Response): Promise<void> {
     promoReservation = await reservePromoUse(appliedPromo, user.sub);
   }
 
-  // Estimated delivery window (minutes), derived from the authoritative distance.
-  const ETA_BASE_MIN = 20;
-  const ETA_PER_KM_MIN = 4;
-  const etaMinutes = distance > 0 ? Math.round(ETA_BASE_MIN + distance * ETA_PER_KM_MIN) : ETA_BASE_MIN;
-  const estimatedDeliveryTime = `${etaMinutes}-${Math.min(etaMinutes + 10, 90)} min`;
+  // Snapshot preparation + route-based rider travel so the order ETA remains
+  // explainable even if the vendor changes preparation settings later.
+  const deliveryWindow = estimateDeliveryWindow(distance, stall);
 
   let order;
   try {
@@ -417,7 +415,11 @@ export async function createOrder(req: Request, res: Response): Promise<void> {
       deliveryInstructions: deliveryInstructionsFromLocation || "",
       notes: typeof body.notes === "string" ? body.notes.trim().slice(0, MAX_TEXT_LENGTH) : "",
       distance,
-      estimatedDeliveryTime,
+      estimatedDeliveryTime: deliveryWindow.estimatedDeliveryTime,
+      preparationTimeMin: deliveryWindow.preparationTimeMin,
+      preparationTimeMax: deliveryWindow.preparationTimeMax,
+      travelTimeMin: deliveryWindow.travelTimeMin,
+      travelTimeMax: deliveryWindow.travelTimeMax,
       customerLatitude: customerLat,
       customerLongitude: customerLng,
       stallLatitude: stall.latitude ?? null,

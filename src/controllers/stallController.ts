@@ -10,6 +10,8 @@ interface StallInput {
   description?: unknown;
   image?: unknown;
   logo?: unknown;
+  prepTimeMin?: unknown;
+  prepTimeMax?: unknown;
   deliveryTime?: unknown;
   deliveryFee?: unknown;
   minOrder?: unknown;
@@ -35,6 +37,14 @@ function nonNegativeNumber(v: unknown, field: string, fallback = 0): number {
   if (v === undefined) return fallback;
   if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
     throw new HttpError(400, `${field} must be a non-negative number`);
+  }
+  return v;
+}
+
+function preparationMinutes(v: unknown, field: string, fallback: number): number {
+  if (v === undefined) return fallback;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 240) {
+    throw new HttpError(400, `${field} must be a whole number between 1 and 240`);
   }
   return v;
 }
@@ -93,6 +103,11 @@ export async function createStall(req: Request, res: Response): Promise<void> {
   if (typeof body.name !== "string" || body.name.trim() === "") {
     throw new HttpError(400, "stall name is required");
   }
+  const prepTimeMin = preparationMinutes(body.prepTimeMin, "prepTimeMin", 15);
+  const prepTimeMax = preparationMinutes(body.prepTimeMax, "prepTimeMax", 25);
+  if (prepTimeMax < prepTimeMin) {
+    throw new HttpError(400, "prepTimeMax must be greater than or equal to prepTimeMin");
+  }
 
   const stall = await StallModel.create({
     name: body.name.trim(),
@@ -100,7 +115,9 @@ export async function createStall(req: Request, res: Response): Promise<void> {
     image: str(body.image),
     logo: str(body.logo),
     rating: 0,
-    deliveryTime: str(body.deliveryTime),
+    prepTimeMin,
+    prepTimeMax,
+    deliveryTime: `${prepTimeMin}-${prepTimeMax} min`,
     deliveryFee: nonNegativeNumber(body.deliveryFee, "deliveryFee"),
     minOrder: nonNegativeNumber(body.minOrder, "minOrder"),
     vendorId: authReq.user?.sub ?? "",
@@ -141,6 +158,20 @@ export async function updateStall(req: Request, res: Response): Promise<void> {
   if ("image" in body) update.image = str(body.image);
   if ("logo" in body) update.logo = str(body.logo);
   if ("deliveryTime" in body) update.deliveryTime = str(body.deliveryTime);
+  const prepTimeMin = "prepTimeMin" in body
+    ? preparationMinutes(body.prepTimeMin, "prepTimeMin", 15)
+    : Number(stall.prepTimeMin ?? 15);
+  const prepTimeMax = "prepTimeMax" in body
+    ? preparationMinutes(body.prepTimeMax, "prepTimeMax", 25)
+    : Number(stall.prepTimeMax ?? 25);
+  if (prepTimeMax < prepTimeMin) {
+    throw new HttpError(400, "prepTimeMax must be greater than or equal to prepTimeMin");
+  }
+  if ("prepTimeMin" in body || "prepTimeMax" in body) {
+    update.prepTimeMin = prepTimeMin;
+    update.prepTimeMax = prepTimeMax;
+    update.deliveryTime = `${prepTimeMin}-${prepTimeMax} min`;
+  }
   if ("deliveryFee" in body) update.deliveryFee = nonNegativeNumber(body.deliveryFee, "deliveryFee");
   if ("minOrder" in body) update.minOrder = nonNegativeNumber(body.minOrder, "minOrder");
   if ("category" in body) update.category = str(body.category);
