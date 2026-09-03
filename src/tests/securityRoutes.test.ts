@@ -7,6 +7,7 @@ import { createApp } from "../app.js";
 import { AUTH_COOKIE, signToken } from "../services/authService.js";
 import { UserModel, type Role } from "../models/user.js";
 import { estimateDeliveryWindow } from "../services/deliveryFeeService.js";
+import { validateAndComposeStallAddress } from "../controllers/stallController.js";
 
 let server: Server;
 let baseUrl = "";
@@ -46,6 +47,37 @@ test("delivery ETA supports legacy stall preparation strings", () => {
   assert.equal(estimate.preparationTimeMin, 20);
   assert.equal(estimate.preparationTimeMax, 30);
   assert.equal(estimate.estimatedDeliveryTime, "30-50 min");
+});
+
+test("structured building stall addresses compose in rider-friendly order", () => {
+  const address = validateAndComposeStallAddress({
+    addressType: "building",
+    addressUnit: "3rd Floor, Stall 18",
+    addressBuilding: "Kultura Mall",
+    addressBlockLot: "",
+    addressStreet: "Katipunan Avenue",
+    addressBarangay: "Barangay Loyola Heights",
+    addressCity: "Quezon City",
+    addressProvince: "Metro Manila",
+    addressPostalCode: "1108",
+    addressLandmark: "Near the north entrance",
+  });
+  assert.equal(address, "3rd Floor, Stall 18, Kultura Mall, Katipunan Avenue, Barangay Loyola Heights, Quezon City, Metro Manila, 1108");
+});
+
+test("structured standalone stall addresses require a block, lot, house, or store number", () => {
+  assert.throws(() => validateAndComposeStallAddress({
+    addressType: "standalone",
+    addressUnit: "",
+    addressBuilding: "",
+    addressBlockLot: "",
+    addressStreet: "Rizal Street",
+    addressBarangay: "Barangay San Jose",
+    addressCity: "Quezon City",
+    addressProvince: "Metro Manila",
+    addressPostalCode: "1100",
+    addressLandmark: "",
+  }), /Block, lot, house, or store number is required/);
 });
 
 test("health remains public", async () => {

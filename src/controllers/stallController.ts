@@ -20,6 +20,16 @@ interface StallInput {
   accentColor?: unknown;
   active?: unknown;
   address?: unknown;
+  addressType?: unknown;
+  addressUnit?: unknown;
+  addressBuilding?: unknown;
+  addressBlockLot?: unknown;
+  addressStreet?: unknown;
+  addressBarangay?: unknown;
+  addressCity?: unknown;
+  addressProvince?: unknown;
+  addressPostalCode?: unknown;
+  addressLandmark?: unknown;
   latitude?: unknown;
   longitude?: unknown;
   isNew?: unknown;
@@ -59,6 +69,91 @@ function coordinate(v: unknown, field: "latitude" | "longitude"): number | null 
     throw new HttpError(400, `${field} is outside its valid range`);
   }
   return v;
+}
+
+const structuredAddressFields = [
+  "addressType",
+  "addressUnit",
+  "addressBuilding",
+  "addressBlockLot",
+  "addressStreet",
+  "addressBarangay",
+  "addressCity",
+  "addressProvince",
+  "addressPostalCode",
+  "addressLandmark",
+] as const;
+
+export interface StructuredStallAddress {
+  addressType: "standalone" | "building";
+  addressUnit: string;
+  addressBuilding: string;
+  addressBlockLot: string;
+  addressStreet: string;
+  addressBarangay: string;
+  addressCity: string;
+  addressProvince: string;
+  addressPostalCode: string;
+  addressLandmark: string;
+}
+
+function addressPart(value: unknown, field: string, maxLength = 120): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw new HttpError(400, `${field} must be text`);
+  const normalized = value.trim();
+  if (normalized.length > maxLength) throw new HttpError(400, `${field} is too long`);
+  return normalized;
+}
+
+function readStructuredAddress(body: StallInput, existing?: Record<string, unknown>): StructuredStallAddress {
+  const read = (field: keyof StructuredStallAddress, maxLength = 120) =>
+    addressPart(field in body ? body[field] : existing?.[field], field, maxLength);
+  const rawType = "addressType" in body ? body.addressType : existing?.addressType;
+  const addressType = rawType === "building" ? "building" : rawType === "standalone" || rawType == null ? "standalone" : null;
+  if (!addressType) throw new HttpError(400, "addressType must be standalone or building");
+  return {
+    addressType,
+    addressUnit: read("addressUnit", 80),
+    addressBuilding: read("addressBuilding"),
+    addressBlockLot: read("addressBlockLot", 80),
+    addressStreet: read("addressStreet"),
+    addressBarangay: read("addressBarangay"),
+    addressCity: read("addressCity"),
+    addressProvince: read("addressProvince"),
+    addressPostalCode: read("addressPostalCode", 12),
+    addressLandmark: read("addressLandmark", 200),
+  };
+}
+
+export function validateAndComposeStallAddress(parts: StructuredStallAddress): string {
+  if (parts.addressType === "building" && !parts.addressBuilding) {
+    throw new HttpError(400, "Building or mall name is required for a building stall");
+  }
+  if (parts.addressType === "standalone" && !parts.addressBlockLot) {
+    throw new HttpError(400, "Block, lot, house, or store number is required for a standalone stall");
+  }
+  if (!parts.addressStreet || !parts.addressBarangay || !parts.addressCity || !parts.addressProvince) {
+    throw new HttpError(400, "Street, barangay, city or municipality, and province are required");
+  }
+  if (parts.addressPostalCode && !/^\d{4}$/.test(parts.addressPostalCode)) {
+    throw new HttpError(400, "addressPostalCode must be a 4-digit Philippine postal code");
+  }
+  const address = [
+    parts.addressUnit,
+    parts.addressBuilding,
+    parts.addressBlockLot,
+    parts.addressStreet,
+    parts.addressBarangay,
+    parts.addressCity,
+    parts.addressProvince,
+    parts.addressPostalCode,
+  ].filter(Boolean).join(", ");
+  if (address.length > 500) throw new HttpError(400, "Stall address is too long");
+  return address;
+}
+
+function hasStructuredAddress(body: StallInput): boolean {
+  return structuredAddressFields.some((field) => field in body);
 }
 
 function escapeRegex(value: string): string {
@@ -108,6 +203,18 @@ export async function createStall(req: Request, res: Response): Promise<void> {
   if (prepTimeMax < prepTimeMin) {
     throw new HttpError(400, "prepTimeMax must be greater than or equal to prepTimeMin");
   }
+  const structuredAddress = hasStructuredAddress(body) ? readStructuredAddress(body) : null;
+  const address = structuredAddress
+    ? validateAndComposeStallAddress(structuredAddress)
+    : addressPart(body.address, "address", 500);
+  const latitude = coordinate(body.latitude, "latitude");
+  const longitude = coordinate(body.longitude, "longitude");
+  if ((latitude === null) !== (longitude === null)) {
+    throw new HttpError(400, "Both latitude and longitude are required together");
+  }
+  if (structuredAddress && (latitude === null || longitude === null)) {
+    throw new HttpError(400, "Choose an exact map location for the structured stall address");
+  }
 
   const stall = await StallModel.create({
     name: body.name.trim(),
@@ -125,9 +232,10 @@ export async function createStall(req: Request, res: Response): Promise<void> {
     cuisine: str(body.cuisine),
     accentColor: str(body.accentColor, "#5B21B6"),
     active: bool(body.active, true),
-    address: str(body.address),
-    latitude: coordinate(body.latitude, "latitude"),
-    longitude: coordinate(body.longitude, "longitude"),
+    address,
+    ...(structuredAddress ?? {}),
+    latitude,
+    longitude,
     menu: Array.isArray(body.menu) ? body.menu : [],
   });
 
@@ -153,6 +261,11 @@ export async function updateStall(req: Request, res: Response): Promise<void> {
 
   const body = req.body as StallInput;
   const update: Record<string, unknown> = {};
+  const nextLatitude = "latitude" in body ? coordinate(body.latitude, "latitude") : stall.latitude ?? null;
+  const nextLongitude = "longitude" in body ? coordinate(body.longitude, "longitude") : stall.longitude ?? null;
+  if ((nextLatitude === null) !== (nextLongitude === null)) {
+    throw new HttpError(400, "Both latitude and longitude are required together");
+  }
   if ("name" in body) update.name = str(body.name);
   if ("description" in body) update.description = str(body.description);
   if ("image" in body) update.image = str(body.image);
@@ -178,9 +291,18 @@ export async function updateStall(req: Request, res: Response): Promise<void> {
   if ("cuisine" in body) update.cuisine = str(body.cuisine);
   if ("accentColor" in body) update.accentColor = str(body.accentColor);
   if ("active" in body) update.active = bool(body.active);
-  if ("address" in body) update.address = str(body.address);
-  if ("latitude" in body) update.latitude = coordinate(body.latitude, "latitude");
-  if ("longitude" in body) update.longitude = coordinate(body.longitude, "longitude");
+  if (hasStructuredAddress(body)) {
+    const structuredAddress = readStructuredAddress(body, stall as unknown as Record<string, unknown>);
+    if (nextLatitude === null || nextLongitude === null) {
+      throw new HttpError(400, "Choose an exact map location for the structured stall address");
+    }
+    update.address = validateAndComposeStallAddress(structuredAddress);
+    Object.assign(update, structuredAddress);
+  } else if ("address" in body) {
+    update.address = addressPart(body.address, "address", 500);
+  }
+  if ("latitude" in body) update.latitude = nextLatitude;
+  if ("longitude" in body) update.longitude = nextLongitude;
   if ("isNew" in body) update.isNew = bool(body.isNew);
 
   const updated = await StallModel.findByIdAndUpdate(id, update, {
