@@ -13,10 +13,11 @@ const userSchema = new Schema(
     phone: { type: String, trim: true, default: "" },
 
     // Auth
-    passwordHash: { type: String, default: "" },
+    passwordHash: { type: String, default: "", select: false },
+    sessionVersion: { type: Number, default: 0, min: 0 },
     emailVerified: { type: Boolean, default: false },
-    passwordResetToken: { type: String, default: null },
-    passwordResetExpires: { type: Date, default: null },
+    passwordResetToken: { type: String, default: null, select: false },
+    passwordResetExpires: { type: Date, default: null, select: false },
 
     // Address (split fields)
     addressStreet: { type: String, default: "" },

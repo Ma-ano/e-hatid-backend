@@ -51,6 +51,7 @@ export class OtpIssuer {
       email: normalized,
       otpHash: hashOtp(otp),
       expiresAt: new Date(now.getTime() + env.otpTtlSeconds * 1000),
+      maxAttempts: env.otpMaxAttempts,
       ipAddress: opts.ip || "",
       userAgent: opts.userAgent || "",
     });
@@ -75,21 +76,44 @@ export class OtpIssuer {
     }
 
     const providedHash = hashOtp(String(providedOtp).trim());
-    const matches = providedHash === latest.otpHash;
+    const matches = crypto.timingSafeEqual(
+      Buffer.from(providedHash, "hex"),
+      Buffer.from(latest.otpHash, "hex"),
+    );
 
     if (!matches) {
-      latest.attemptCount += 1;
-      const remaining = latest.maxAttempts - latest.attemptCount;
-      await latest.save();
+      const attempted = await OtpRequestModel.findOneAndUpdate(
+        {
+          _id: latest._id,
+          isUsed: false,
+          expiresAt: { $gt: new Date() },
+          attemptCount: { $lt: latest.maxAttempts },
+        },
+        { $inc: { attemptCount: 1 } },
+        { new: true },
+      );
+      if (!attempted) {
+        throw new HttpError(429, "Too many incorrect attempts. Please request a new code.");
+      }
+      const remaining = attempted.maxAttempts - attempted.attemptCount;
       if (remaining <= 0) {
-        await latest.updateOne({ isUsed: true });
+        await OtpRequestModel.updateOne(
+          { _id: latest._id, isUsed: false },
+          { $set: { isUsed: true } },
+        );
         console.warn(`[otp] Verifications exhausted for ${normalized}`);
         throw new HttpError(429, "Too many incorrect attempts. Please request a new code.");
       }
       throw new HttpError(400, `Incorrect OTP. ${remaining} attempt(s) remaining.`);
     }
 
-    await latest.updateOne({ isUsed: true });
+    const consumed = await OtpRequestModel.updateOne(
+      { _id: latest._id, isUsed: false, expiresAt: { $gt: new Date() } },
+      { $set: { isUsed: true } },
+    );
+    if (consumed.modifiedCount !== 1) {
+      throw new HttpError(409, "This OTP was already used. Please request a new code.");
+    }
     // Count total failed attempts across the user's recent requests to flag abuse.
     const recentFailed = await OtpRequestModel.countDocuments({
       email: normalized,

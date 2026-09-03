@@ -3,6 +3,7 @@ import { isValidObjectId } from "mongoose";
 import { HttpError } from "../middlewares/errorHandler.js";
 import { StallModel } from "../models/stall.js";
 import { logAudit } from "../services/auditLogService.js";
+import { getDbUser } from "../middlewares/auth.js";
 
 interface StallInput {
   name?: unknown;
@@ -26,15 +27,32 @@ interface StallInput {
 function str(v: unknown, fallback = ""): string {
   return typeof v === "string" ? v : fallback;
 }
-function num(v: unknown, fallback = 0): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
 function bool(v: unknown, fallback = false): boolean {
   return typeof v === "boolean" ? v : fallback;
 }
-function nullableNum(v: unknown): number | null {
-  return v === null || v === undefined ? null : num(v);
+
+function nonNegativeNumber(v: unknown, field: string, fallback = 0): number {
+  if (v === undefined) return fallback;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+    throw new HttpError(400, `${field} must be a non-negative number`);
+  }
+  return v;
+}
+
+function coordinate(v: unknown, field: "latitude" | "longitude"): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new HttpError(400, `${field} must be a finite number or null`);
+  }
+  const limit = field === "latitude" ? 90 : 180;
+  if (v < -limit || v > limit) {
+    throw new HttpError(400, `${field} is outside its valid range`);
+  }
+  return v;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function listStalls(req: Request, res: Response): Promise<void> {
@@ -44,7 +62,7 @@ export async function listStalls(req: Request, res: Response): Promise<void> {
     filter.category = category;
   }
   if (search && search.trim() !== "") {
-    const q = search.trim();
+    const q = escapeRegex(search.trim().slice(0, 100));
     filter.$or = [{ name: { $regex: q, $options: "i" } }, { cuisine: { $regex: q, $options: "i" } }];
   }
   const stalls = await StallModel.find(filter).sort({ rating: -1 }).lean();
@@ -83,16 +101,16 @@ export async function createStall(req: Request, res: Response): Promise<void> {
     logo: str(body.logo),
     rating: 0,
     deliveryTime: str(body.deliveryTime),
-    deliveryFee: num(body.deliveryFee),
-    minOrder: num(body.minOrder),
+    deliveryFee: nonNegativeNumber(body.deliveryFee, "deliveryFee"),
+    minOrder: nonNegativeNumber(body.minOrder, "minOrder"),
     vendorId: authReq.user?.sub ?? "",
     category: str(body.category, "Fast Food"),
     cuisine: str(body.cuisine),
     accentColor: str(body.accentColor, "#5B21B6"),
     active: bool(body.active, true),
     address: str(body.address),
-    latitude: nullableNum(body.latitude),
-    longitude: nullableNum(body.longitude),
+    latitude: coordinate(body.latitude, "latitude"),
+    longitude: coordinate(body.longitude, "longitude"),
     menu: Array.isArray(body.menu) ? body.menu : [],
   });
 
@@ -109,7 +127,8 @@ export async function updateStall(req: Request, res: Response): Promise<void> {
     throw new HttpError(404, "Stall not found");
   }
 
-  const admin = (authReq.user?.activeRole ?? authReq.user?.role) === "admin";
+  const dbUser = getDbUser(req) as { roles?: string[] } | undefined;
+  const admin = dbUser?.roles?.includes("admin") === true;
   const owner = stall.vendorId === authReq.user?.sub;
   if (!owner && !admin) {
     throw new HttpError(403, "You do not have permission to edit this stall");
@@ -122,15 +141,15 @@ export async function updateStall(req: Request, res: Response): Promise<void> {
   if ("image" in body) update.image = str(body.image);
   if ("logo" in body) update.logo = str(body.logo);
   if ("deliveryTime" in body) update.deliveryTime = str(body.deliveryTime);
-  if ("deliveryFee" in body) update.deliveryFee = num(body.deliveryFee);
-  if ("minOrder" in body) update.minOrder = num(body.minOrder);
+  if ("deliveryFee" in body) update.deliveryFee = nonNegativeNumber(body.deliveryFee, "deliveryFee");
+  if ("minOrder" in body) update.minOrder = nonNegativeNumber(body.minOrder, "minOrder");
   if ("category" in body) update.category = str(body.category);
   if ("cuisine" in body) update.cuisine = str(body.cuisine);
   if ("accentColor" in body) update.accentColor = str(body.accentColor);
   if ("active" in body) update.active = bool(body.active);
   if ("address" in body) update.address = str(body.address);
-  if ("latitude" in body) update.latitude = nullableNum(body.latitude);
-  if ("longitude" in body) update.longitude = nullableNum(body.longitude);
+  if ("latitude" in body) update.latitude = coordinate(body.latitude, "latitude");
+  if ("longitude" in body) update.longitude = coordinate(body.longitude, "longitude");
   if ("isNew" in body) update.isNew = bool(body.isNew);
 
   const updated = await StallModel.findByIdAndUpdate(id, update, {
@@ -154,13 +173,14 @@ export async function updateStallMenu(req: Request, res: Response): Promise<void
   if (!stall) {
     throw new HttpError(404, "Stall not found");
   }
-  const admin = (authReq.user?.activeRole ?? authReq.user?.role) === "admin";
+  const dbUser = getDbUser(req) as { roles?: string[] } | undefined;
+  const admin = dbUser?.roles?.includes("admin") === true;
   const owner = stall.vendorId === authReq.user?.sub;
   if (!owner && !admin) {
     throw new HttpError(403, "You do not have permission to edit this stall's menu");
   }
 
-  const updated = await StallModel.findByIdAndUpdate(id, { menu }, { new: true }).lean();
+  const updated = await StallModel.findByIdAndUpdate(id, { menu }, { new: true, runValidators: true }).lean();
   res.status(200).json({ data: updated });
 }
 

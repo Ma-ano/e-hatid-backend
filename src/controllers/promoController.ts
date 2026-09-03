@@ -23,15 +23,20 @@ async function requireAdmin(req: Request): Promise<void> {
   }
 }
 
-function toNumber(v: unknown, fallback = 0): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+function toNumber(v: unknown, field: string, fallback = 0): number {
+  if (v === undefined) return fallback;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+    throw new HttpError(400, `${field} must be a non-negative number`);
+  }
+  return v;
 }
-function toNullableDate(v: unknown): Date | null {
+function toNullableDate(v: unknown, field: string): Date | null {
+  if (v === null || v === "") return null;
   if (typeof v === "string" && v !== "") {
     const d = new Date(v);
     if (!Number.isNaN(d.getTime())) return d;
   }
-  return null;
+  throw new HttpError(400, `${field} must be a valid date or null`);
 }
 
 /** Preview a promo code before checkout (any authenticated user). */
@@ -52,9 +57,9 @@ export async function checkPromo(req: Request, res: Response): Promise<void> {
       code,
       stallId,
       userId: user.sub,
-      subtotal: toNumber(subtotal),
+      subtotal: toNumber(subtotal, "subtotal"),
     },
-    toNumber(deliveryFee),
+    toNumber(deliveryFee, "deliveryFee"),
   );
   res.status(200).json({ data: result });
 }
@@ -99,7 +104,9 @@ export async function createPromo(req: Request, res: Response): Promise<void> {
   const body = req.body as Record<string, unknown>;
   const code = typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
   const type = body.type as PromoType;
-  if (!code) throw new HttpError(400, "code required");
+  if (!/^[A-Z0-9_-]{3,32}$/.test(code)) {
+    throw new HttpError(400, "code must be 3-32 letters, numbers, underscores or hyphens");
+  }
   if (!["percent", "fixed", "free_delivery"].includes(type)) {
     throw new HttpError(400, "type must be percent, fixed or free_delivery");
   }
@@ -107,16 +114,26 @@ export async function createPromo(req: Request, res: Response): Promise<void> {
   const exists = await PromoModel.findOne({ code }).lean();
   if (exists) throw new HttpError(409, "Promo code already exists");
 
+  const value = toNumber(body.value, "value");
+  if (type === "percent" && value > 100) {
+    throw new HttpError(400, "Percent promo value cannot exceed 100");
+  }
+  const startsAt = toNullableDate(body.startsAt ?? null, "startsAt");
+  const expiresAt = toNullableDate(body.expiresAt ?? null, "expiresAt");
+  if (startsAt && expiresAt && startsAt >= expiresAt) {
+    throw new HttpError(400, "expiresAt must be later than startsAt");
+  }
+
   const promo = await PromoModel.create({
     code,
     type,
-    value: toNumber(body.value),
-    minSubtotal: toNumber(body.minSubtotal),
-    maxDiscount: toNumber(body.maxDiscount),
-    usageLimit: toNumber(body.usageLimit),
-    perUserLimit: toNumber(body.perUserLimit, 1),
-    startsAt: toNullableDate(body.startsAt),
-    expiresAt: toNullableDate(body.expiresAt),
+    value,
+    minSubtotal: toNumber(body.minSubtotal, "minSubtotal"),
+    maxDiscount: toNumber(body.maxDiscount, "maxDiscount"),
+    usageLimit: toNumber(body.usageLimit, "usageLimit"),
+    perUserLimit: toNumber(body.perUserLimit, "perUserLimit", 1),
+    startsAt,
+    expiresAt,
     stallId: typeof body.stallId === "string" ? body.stallId : "",
     active: body.active !== false,
     description: typeof body.description === "string" ? body.description : "",
@@ -141,7 +158,12 @@ export async function updatePromo(req: Request, res: Response): Promise<void> {
   const update: Record<string, unknown> = {};
   const strings: (keyof typeof body)[] = ["code", "description", "stallId"];
   for (const key of strings) {
-    if (typeof body[key] === "string") update[key] = key === "code" ? body[key].trim().toUpperCase() : body[key];
+    if (body[key] === undefined) continue;
+    if (typeof body[key] !== "string") throw new HttpError(400, `${key} must be a string`);
+    update[key] = key === "code" ? body[key].trim().toUpperCase() : body[key];
+  }
+  if (typeof update.code === "string" && !/^[A-Z0-9_-]{3,32}$/.test(update.code)) {
+    throw new HttpError(400, "code must be 3-32 letters, numbers, underscores or hyphens");
   }
   const numbers: (keyof typeof body)[] = [
     "value",
@@ -152,21 +174,36 @@ export async function updatePromo(req: Request, res: Response): Promise<void> {
     "perUserLimit",
   ];
   for (const key of numbers) {
-    if (typeof body[key] === "number" && Number.isFinite(body[key])) update[key] = body[key];
+    if (body[key] !== undefined) update[key] = toNumber(body[key], key);
   }
   for (const key of ["active"] as const) {
     if (typeof body[key] === "boolean") update[key] = body[key];
   }
   for (const key of ["startsAt", "expiresAt"] as const) {
-    const d = toNullableDate(body[key]);
-    update[key] = d;
+    if (key in body) update[key] = toNullableDate(body[key], key);
   }
 
-  if (typeof body.type === "string" && ["percent", "fixed", "free_delivery"].includes(body.type)) {
+  if (body.type !== undefined) {
+    if (typeof body.type !== "string" || !["percent", "fixed", "free_delivery"].includes(body.type)) {
+      throw new HttpError(400, "type must be percent, fixed or free_delivery");
+    }
     update.type = body.type;
   }
 
-  const promo = await PromoModel.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
+  const current = await PromoModel.findById(id).lean();
+  if (!current) throw new HttpError(404, "Promo not found");
+  const nextType = (update.type ?? current.type) as PromoType;
+  const nextValue = typeof update.value === "number" ? update.value : current.value;
+  if (nextType === "percent" && nextValue > 100) {
+    throw new HttpError(400, "Percent promo value cannot exceed 100");
+  }
+  const nextStart = "startsAt" in update ? update.startsAt as Date | null : current.startsAt;
+  const nextExpiry = "expiresAt" in update ? update.expiresAt as Date | null : current.expiresAt;
+  if (nextStart && nextExpiry && new Date(nextStart) >= new Date(nextExpiry)) {
+    throw new HttpError(400, "expiresAt must be later than startsAt");
+  }
+
+  const promo = await PromoModel.findByIdAndUpdate(id, { $set: update }, { new: true, runValidators: true }).lean();
   if (!promo) throw new HttpError(404, "Promo not found");
   await logAudit(req, {
     category: "promo",

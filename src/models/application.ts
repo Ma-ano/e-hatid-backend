@@ -13,5 +13,11 @@ const applicationSchema = new Schema(
   { timestamps: true, versionKey: false },
 );
 
+applicationSchema.index(
+  { userId: 1, role: 1 },
+  { unique: true, partialFilterExpression: { status: "pending" } },
+);
+applicationSchema.index({ status: 1, createdAt: -1 });
+
 export type Application = InferSchemaType<typeof applicationSchema>;
 export const ApplicationModel = model("Application", applicationSchema);

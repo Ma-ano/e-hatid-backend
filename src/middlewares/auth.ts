@@ -10,7 +10,7 @@ import {
 import { ROLES, UserModel, type Role } from "../models/user.js";
 
 interface AuthRequest extends Request {
-  user?: { sub: string; role: string; activeRole: string };
+  user?: { sub: string; role: string; activeRole: string; ver?: number };
   dbUser?: unknown;
 }
 
@@ -24,17 +24,28 @@ export function loadUser(req: Request, res: Response, next: NextFunction): void 
 }
 
 /** Requires a valid auth cookie. Rejects unauthenticated requests. */
-export function requireAuth(req: Request, _res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const token = req.cookies?.[AUTH_COOKIE] as string | undefined;
   if (!token) {
     throw new HttpError(401, "Authentication required");
   }
+  let payload: ReturnType<typeof verifyToken>;
   try {
-    (req as AuthRequest).user = verifyToken(token);
-    next();
+    payload = verifyToken(token);
   } catch {
     throw new HttpError(401, "Session expired or invalid");
   }
+
+  // Keep database failures distinct from invalid credentials. If MongoDB is
+  // unavailable, the global error handler returns a server error instead of
+  // misleading clients into discarding an otherwise valid session.
+  const user = await UserModel.findById(payload.sub).lean();
+  if (!user || (payload.ver ?? 0) !== (user.sessionVersion ?? 0)) {
+    throw new HttpError(401, "Session expired or invalid");
+  }
+  (req as AuthRequest).user = payload;
+  (req as AuthRequest).dbUser = user;
+  next();
 }
 
 /**
@@ -48,7 +59,8 @@ export function requireRole(...roles: Role[]) {
     if (!authReq.user) {
       throw new HttpError(401, "Authentication required");
     }
-    const user = await UserModel.findById(authReq.user.sub).lean();
+    const user = (authReq.dbUser as { roles?: Role[] } | null | undefined)
+      ?? await UserModel.findById(authReq.user.sub).lean();
     if (!user) {
       throw new HttpError(401, "User account no longer exists");
     }

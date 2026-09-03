@@ -8,39 +8,43 @@ import { pushNotification } from "./notificationService.js";
  */
 export async function sweepExpiredPendingOrders(): Promise<number> {
   const cutoff = new Date(Date.now() - env.orderAutoCancelMinutes * 60 * 1000);
-  const result = await OrderModel.updateMany(
-    {
-      status: "pending",
-      createdAt: { $lt: cutoff },
-    },
-    {
-      status: "cancelled",
-      cancelledReason: `Auto-cancelled: not accepted within ${env.orderAutoCancelMinutes} minutes`,
-    },
-  );
+  let cancelled = 0;
 
-  if (result.modifiedCount > 0) {
-    // Notify affected customers.
-    const affected = await OrderModel.find({
-      status: "cancelled",
-      createdAt: { $lt: cutoff },
-    } as never)
-      .select("userId")
+  // Claim one pending order at a time with a conditional update. This makes
+  // multiple app instances safe and gives us the exact records to notify.
+  while (cancelled < 500) {
+    const order = await OrderModel.findOneAndUpdate(
+      { status: "pending", createdAt: { $lt: cutoff } },
+      {
+        $set: {
+          status: "cancelled",
+          cancelledReason: `Auto-cancelled: not accepted within ${env.orderAutoCancelMinutes} minutes`,
+        },
+      },
+      { new: true, sort: { createdAt: 1 } },
+    )
+      .select("_id userId")
       .lean();
-    const userIds = [...new Set((affected as { userId: string }[]).map((o) => o.userId))];
-    for (const uid of userIds) {
+    if (!order) break;
+
+    cancelled += 1;
+    try {
       await pushNotification(
-        { userId: uid },
-        `An order was auto-cancelled because the vendor did not accept it in time.`,
+        { userId: order.userId },
+        "Your order was auto-cancelled because the vendor did not accept it in time.",
         "warning",
+        String(order._id),
       );
+    } catch (err) {
+      console.warn("[orders] auto-cancel notification failed:", err);
     }
   }
 
-  return result.modifiedCount;
+  return cancelled;
 }
 
 let _sweepHandle: NodeJS.Timeout | null = null;
+let _sweepRunning = false;
 
 /**
  * Start the background sweep. Idempotent. Runs every N ms (default 60s).
@@ -48,6 +52,8 @@ let _sweepHandle: NodeJS.Timeout | null = null;
 export function startOrderLifecycleSweep(intervalMs = 60_000): void {
   if (_sweepHandle) return;
   const run = async (): Promise<void> => {
+    if (_sweepRunning) return;
+    _sweepRunning = true;
     try {
       const cancelled = await sweepExpiredPendingOrders();
       if (cancelled > 0) {
@@ -55,6 +61,8 @@ export function startOrderLifecycleSweep(intervalMs = 60_000): void {
       }
     } catch (err) {
       console.error("[orders] auto-cancel sweep error:", err);
+    } finally {
+      _sweepRunning = false;
     }
   };
   run();

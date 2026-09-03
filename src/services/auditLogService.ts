@@ -17,10 +17,7 @@ export async function logAudit(req: Request, entry: AuditEntry): Promise<void> {
   try {
     const actorId =
       (req as Request & { user?: { sub?: string } }).user?.sub ?? "";
-    const ip =
-      (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
-      req.socket.remoteAddress ||
-      "";
+    const ip = req.ip || req.socket.remoteAddress || "";
     await AuditLogModel.create({
       actorId: actorId || null,
       category: entry.category,

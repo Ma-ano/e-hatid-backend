@@ -4,6 +4,7 @@ import { UserModel } from "../models/user.js";
 import { toSafeUser } from "../services/userService.js";
 import { getDbUser, requireAuth } from "../middlewares/auth.js";
 import { logAudit } from "../services/auditLogService.js";
+import { ApplicationModel } from "../models/application.js";
 
 const PROFILE_FIELDS = [
   "name",
@@ -43,7 +44,34 @@ export async function updateMe(req: Request, res: Response): Promise<void> {
   const update: Record<string, unknown> = {};
   for (const field of PROFILE_FIELDS) {
     if (field in body && body[field] !== undefined) {
-      update[field] = body[field];
+      const value = body[field];
+      if (field === "latitude" || field === "longitude") {
+        if (value === null) {
+          update[field] = null;
+          continue;
+        }
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          throw new HttpError(400, `${field} must be a finite number or null`);
+        }
+        const limit = field === "latitude" ? 90 : 180;
+        if (value < -limit || value > limit) {
+          throw new HttpError(400, `${field} is outside its valid range`);
+        }
+        update[field] = value;
+        continue;
+      }
+      if (typeof value !== "string") {
+        throw new HttpError(400, `${field} must be a string`);
+      }
+      const trimmed = value.trim();
+      if (field === "name" && trimmed === "") {
+        throw new HttpError(400, "name cannot be empty");
+      }
+      const maxLength = field === "avatar" ? 750_000 : 500;
+      if (trimmed.length > maxLength) {
+        throw new HttpError(400, `${field} is too long`);
+      }
+      update[field] = trimmed;
     }
   }
 
@@ -60,10 +88,12 @@ export async function updateMe(req: Request, res: Response): Promise<void> {
 export async function setAvailability(req: Request, res: Response): Promise<void> {
   const authReq = req as Request & { user?: { sub: string } };
   const { available } = req.body as { available?: unknown };
-  const state = typeof available === "boolean" ? available : available === true;
+  if (typeof available !== "boolean") {
+    throw new HttpError(400, "available must be a boolean");
+  }
   const user = await UserModel.findByIdAndUpdate(
     authReq.user?.sub,
-    { available: state },
+    { available },
     { new: true },
   ).lean();
   if (!user) {
@@ -74,13 +104,15 @@ export async function setAvailability(req: Request, res: Response): Promise<void
 
 export async function applyForRole(req: Request, res: Response): Promise<void> {
   const authReq = req as Request & { user?: { sub: string } };
+  const userId = authReq.user?.sub;
+  if (!userId) throw new HttpError(401, "Authentication required");
   const { role } = req.body as { role?: unknown; data?: unknown };
 
   if (role !== "rider" && role !== "vendor") {
     throw new HttpError(400, "role must be 'rider' or 'vendor'");
   }
 
-  const user = await UserModel.findById(authReq.user?.sub).lean();
+  const user = await UserModel.findById(userId).lean();
   if (!user) {
     throw new HttpError(404, "User not found");
   }
@@ -92,12 +124,22 @@ export async function applyForRole(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const roleStatus = { ...(user.roleStatus ?? {}) };
-  roleStatus[role] = "pending";
+  const pending = await ApplicationModel.findOne({ userId, role, status: "pending" }).lean();
+  if (!pending) {
+    try {
+      await ApplicationModel.create({ userId, role, status: "pending", data: {} });
+    } catch (err) {
+      if (!(typeof err === "object" && err !== null && (err as { code?: number }).code === 11000)) {
+        throw err;
+      }
+    }
+  }
 
-  await UserModel.findByIdAndUpdate(authReq.user?.sub, { roleStatus });
+  await UserModel.findByIdAndUpdate(userId, {
+    $set: { [`roleStatus.${role}`]: "pending" },
+  });
 
-  const updated = await UserModel.findById(authReq.user?.sub).lean();
+  const updated = await UserModel.findById(userId).lean();
   res.status(200).json({ data: updated ? toSafeUser(updated) : toSafeUser(user) });
 }
 
@@ -119,22 +161,31 @@ export async function setRoleStatus(req: Request, res: Response): Promise<void> 
     throw new HttpError(404, "User not found");
   }
 
-  const roleStatus = { ...(user.roleStatus ?? {}) };
-  roleStatus[role] = status;
+  const actor = getDbUser(req) as { isMasterAdmin?: boolean } | undefined;
+  if (role === "admin" && actor?.isMasterAdmin !== true) {
+    throw new HttpError(403, "Only the master administrator can change admin access");
+  }
+  if (role === "admin" && user.isMasterAdmin && status !== "approved") {
+    throw new HttpError(403, "The master administrator cannot be demoted");
+  }
 
   const roles = user.roles ?? [];
-  let newRoles = roles;
-  if (status === "approved" && !roles.includes(role)) {
-    newRoles = [...roles, role];
-  }
-  if ((status === "rejected" || status === "pending") && role !== "admin") {
-    newRoles = newRoles.filter((r) => r !== role);
+  const newRoles = status === "approved"
+    ? (roles.includes(role) ? roles : [...roles, role])
+    : roles.filter((memberRole) => memberRole !== role);
+
+  const update: Record<string, unknown> = {
+    [`roleStatus.${role}`]: status,
+    roles: newRoles,
+  };
+  if (status !== "approved" && user.activeRole === role) {
+    update.activeRole = "customer";
   }
 
   const updated = await UserModel.findByIdAndUpdate(
     id,
-    { roleStatus, roles: newRoles },
-    { new: true },
+    { $set: update, $inc: { sessionVersion: 1 } },
+    { new: true, runValidators: true },
   ).lean();
 
   await logAudit(req, {
@@ -149,7 +200,7 @@ export async function setRoleStatus(req: Request, res: Response): Promise<void> 
 }
 
 export async function listUsers(_req: Request, res: Response): Promise<void> {
-  const users = await UserModel.find().sort({ createdAt: -1 }).lean();
+  const users = await UserModel.find().sort({ createdAt: -1 }).limit(500).lean();
   res.status(200).json({ data: users.map(toSafeUser) });
 }
 

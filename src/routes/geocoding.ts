@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { rateLimit } from "../middlewares/rateLimit.js";
+import { env } from "../config/env.js";
 
 export const geocodingRouter = Router();
 
@@ -56,11 +57,21 @@ function coordKey(lat: number, lng: number): string {
 }
 
 function getApiKey(): string {
-  const key = process.env.GOOGLE_GEOCODING_API_KEY;
+  const key = env.googleGeocodingApiKey;
   if (!key) {
     throw new Error("GOOGLE_GEOCODING_API_KEY is not configured");
   }
   return key;
+}
+
+async function fetchGeocoding(url: string): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), env.geocodingTimeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -145,7 +156,7 @@ geocodingRouter.get("/search", searchLimiter, async (req: Request, res: Response
       components: "country:PH",
     });
 
-    const upstream = await fetch(`${GOOGLE_GEOCODE_BASE}?${params}`);
+    const upstream = await fetchGeocoding(`${GOOGLE_GEOCODE_BASE}?${params}`);
     if (!upstream.ok) {
       console.warn(`Geocoding upstream ${upstream.status} for search`);
       res.status(502).json({ error: { message: "Address search failed. Please try again." } });
@@ -214,7 +225,7 @@ geocodingRouter.get("/reverse", reverseLimiter, async (req: Request, res: Respon
       key: apiKey,
     });
 
-    const upstream = await fetch(`${GOOGLE_GEOCODE_BASE}?${params}`);
+    const upstream = await fetchGeocoding(`${GOOGLE_GEOCODE_BASE}?${params}`);
     if (!upstream.ok) {
       console.warn(`Geocoding upstream ${upstream.status} for reverse`);
       res.status(502).json({ error: { message: "Location lookup failed. Please try again." } });

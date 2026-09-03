@@ -16,6 +16,9 @@ export async function estimateDelivery(req: Request, res: Response): Promise<voi
   const subtotal = Number(req.query.subtotal);
 
   if (!stallId) throw new HttpError(400, "stallId is required");
+  if (!Number.isFinite(subtotal) || subtotal < 0 || subtotal > 10_000_000) {
+    throw new HttpError(400, "subtotal must be a non-negative number");
+  }
   const stall = await StallModel.findById(stallId).lean();
   if (!stall) throw new HttpError(404, "Stall not found");
 
@@ -26,6 +29,15 @@ export async function estimateDelivery(req: Request, res: Response): Promise<voi
   };
   const customerLat = toNumber(lat);
   const customerLng = toNumber(lng);
+  if (customerLat !== null && (customerLat < -90 || customerLat > 90)) {
+    throw new HttpError(400, "lat is outside its valid range");
+  }
+  if (customerLng !== null && (customerLng < -180 || customerLng > 180)) {
+    throw new HttpError(400, "lng is outside its valid range");
+  }
+  if ((customerLat === null) !== (customerLng === null)) {
+    throw new HttpError(400, "lat and lng must be provided together");
+  }
 
   const hasCoords =
     customerLat != null &&
@@ -36,7 +48,7 @@ export async function estimateDelivery(req: Request, res: Response): Promise<voi
   let response: EstimateResponse;
   if (hasCoords) {
     const estimate = await estimateDeliveryFee({
-      subtotal: Number.isFinite(subtotal) ? subtotal : 0,
+      subtotal,
       pickupLat: stall.latitude as number,
       pickupLng: stall.longitude as number,
       dropLat: customerLat as number,

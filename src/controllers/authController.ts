@@ -24,8 +24,26 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function issueToken(res: Response, user: SafeUser): void {
-  const token = signToken({ sub: user.id, role: user.role, activeRole: user.activeRole });
+function normalizeEmail(value: string): string {
+  const email = value.trim().toLowerCase();
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpError(400, "email is invalid");
+  }
+  return email;
+}
+
+function validatePassword(value: unknown, field = "password"): string {
+  if (typeof value !== "string" || value.length < 8) {
+    throw new HttpError(400, `${field} must be at least 8 characters`);
+  }
+  if (Buffer.byteLength(value, "utf8") > 72) {
+    throw new HttpError(400, `${field} must be at most 72 UTF-8 bytes`);
+  }
+  return value;
+}
+
+function issueToken(res: Response, user: SafeUser, sessionVersion: number): void {
+  const token = signToken({ sub: user.id, role: user.role, activeRole: user.activeRole, ver: sessionVersion });
   setAuthCookie(res, token);
 }
 
@@ -38,39 +56,41 @@ export async function register(req: Request, res: Response): Promise<void> {
     address?: unknown;
   };
 
-  if (typeof name !== "string" || name.trim() === "") {
+  if (typeof name !== "string" || name.trim() === "" || name.trim().length > 100) {
     throw new HttpError(400, "name is required");
   }
   if (typeof email !== "string" || email.trim() === "") {
     throw new HttpError(400, "email is required");
   }
-  if (typeof password !== "string" || password.length < 8) {
-    throw new HttpError(400, "password must be at least 8 characters");
-  }
+  const validPassword = validatePassword(password);
+  const normalizedPhone = typeof phone === "string" ? phone.trim() : "";
+  const normalizedAddress = typeof address === "string" ? address.trim() : "";
+  if (normalizedPhone.length > 30) throw new HttpError(400, "phone is too long");
+  if (normalizedAddress.length > 500) throw new HttpError(400, "address is too long");
 
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail = normalizeEmail(email);
   const exists = await UserModel.findOne({ email: normalizedEmail });
   if (exists) {
     throw new HttpError(409, "An account with that email already exists");
   }
 
-  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const passwordHash = await bcrypt.hash(validPassword, BCRYPT_ROUNDS);
   const user = await UserModel.create({
     name: name.trim(),
     email: normalizedEmail,
-    phone: typeof phone === "string" ? phone.trim() : "",
+    phone: normalizedPhone,
     passwordHash,
     emailVerified: false,
     role: "customer",
     roles: ["customer"],
     activeRole: "customer",
     roleStatus: { customer: "approved", rider: "none", vendor: "none", admin: "none" },
-    address: typeof address === "string" ? address.trim() : "",
+    address: normalizedAddress,
   });
 
   const safe = toSafeUser(user.toObject());
-  issueToken(res, safe);
-  res.status(201).json({ data: safe, csrfToken: getServerCsrf() });
+  issueToken(res, safe, user.sessionVersion);
+  res.status(201).json({ data: safe, csrfToken: getServerCsrf(req, res) });
 }
 
 export async function login(req: Request, res: Response): Promise<void> {
@@ -78,11 +98,11 @@ export async function login(req: Request, res: Response): Promise<void> {
   if (typeof email !== "string" || email.trim() === "") {
     throw new HttpError(400, "email is required");
   }
-  if (typeof password !== "string" || password === "") {
+  if (typeof password !== "string" || password === "" || Buffer.byteLength(password, "utf8") > 72) {
     throw new HttpError(400, "password is required");
   }
 
-  const user = await UserModel.findOne({ email: email.toLowerCase().trim() }).lean();
+  const user = await UserModel.findOne({ email: normalizeEmail(email) }).select("+passwordHash").lean();
   if (!user || !user.passwordHash) {
     throw new HttpError(401, "Invalid email or password");
   }
@@ -93,11 +113,15 @@ export async function login(req: Request, res: Response): Promise<void> {
   }
 
   const safe = toSafeUser(user);
-  issueToken(res, safe);
-  res.status(200).json({ data: safe, csrfToken: getServerCsrf() });
+  issueToken(res, safe, user.sessionVersion ?? 0);
+  res.status(200).json({ data: safe, csrfToken: getServerCsrf(req, res) });
 }
 
-export async function logout(_req: Request, res: Response): Promise<void> {
+export async function logout(req: Request, res: Response): Promise<void> {
+  const authReq = req as Request & { user?: { sub: string } };
+  if (authReq.user?.sub) {
+    await UserModel.updateOne({ _id: authReq.user.sub }, { $inc: { sessionVersion: 1 } });
+  }
   clearAuthCookie(res);
   res.status(200).json({ data: { success: true } });
 }
@@ -105,14 +129,15 @@ export async function logout(_req: Request, res: Response): Promise<void> {
 /**
  * Request a password reset. Always answers the same way whether or not the
  * email exists, so the endpoint cannot be used to enumerate accounts.
- * In dev/demo (no SMTP) the reset token is echoed so the flow can be tested.
+ * With explicitly enabled local demo mode, the reset token is echoed so the
+ * flow can be tested without SMTP. It is never echoed in production.
  */
 export async function forgotPassword(req: Request, res: Response): Promise<void> {
   const { email } = req.body as { email?: unknown };
   if (typeof email !== "string" || email.trim() === "") {
     throw new HttpError(400, "email is required");
   }
-  const normalized = email.trim().toLowerCase();
+  const normalized = normalizeEmail(email);
 
   const user = await UserModel.findOne({ email: normalized });
   let demoResetToken: string | undefined;
@@ -123,12 +148,18 @@ export async function forgotPassword(req: Request, res: Response): Promise<void>
       passwordResetExpires: new Date(Date.now() + RESET_TTL_MS),
     });
     const link = `${env.clientOrigin}/reset-password?token=${token}`;
-    await sendMail({
-      to: normalized,
-      subject: "Reset your E-Hatid password",
-      text: `You requested a password reset for E-Hatid.\n\nOpen this link within 1 hour to set a new password:\n${link}\n\nIf you did not request this, you can safely ignore this email.`,
-    });
-    if (!smtpConfigured) {
+    try {
+      await sendMail({
+        to: normalized,
+        subject: "Reset your E-Hatid password",
+        text: `You requested a password reset for E-Hatid.\n\nOpen this link within 1 hour to set a new password:\n${link}\n\nIf you did not request this, you can safely ignore this email.`,
+      });
+    } catch (err) {
+      // Preserve the endpoint's non-enumerating response contract even when
+      // the mail provider is unavailable. Operational details stay server-side.
+      console.error("[auth] password reset email delivery failed", err);
+    }
+    if (!smtpConfigured && !env.isProduction && env.allowInsecureDemoOtp) {
       demoResetToken = token;
     }
   }
@@ -136,7 +167,7 @@ export async function forgotPassword(req: Request, res: Response): Promise<void>
   res.status(200).json({
     data: {
       sent: true,
-      // Dev/demo fallback so password reset works without a mail server.
+      // Explicit local-only fallback so reset can be tested without mail.
       demoResetToken,
     },
     message: "If an account exists for that email, a reset link has been sent.",
@@ -149,24 +180,23 @@ export async function resetPassword(req: Request, res: Response): Promise<void> 
   if (typeof token !== "string" || token === "") {
     throw new HttpError(400, "token is required");
   }
-  if (typeof password !== "string" || password.length < 8) {
-    throw new HttpError(400, "password must be at least 8 characters");
-  }
+  const validPassword = validatePassword(password);
 
-  const user = await UserModel.findOne({
-    passwordResetToken: hashToken(token),
-    passwordResetExpires: { $gt: new Date() },
-  });
+  const passwordHash = await bcrypt.hash(validPassword, BCRYPT_ROUNDS);
+  const user = await UserModel.findOneAndUpdate(
+    {
+      passwordResetToken: hashToken(token),
+      passwordResetExpires: { $gt: new Date() },
+    },
+    {
+      $set: { passwordHash, passwordResetToken: null, passwordResetExpires: null },
+      $inc: { sessionVersion: 1 },
+    },
+    { new: true },
+  );
   if (!user) {
     throw new HttpError(400, "This reset link is invalid or has expired. Please request a new one.");
   }
-
-  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-  await UserModel.findByIdAndUpdate(user._id, {
-    passwordHash,
-    passwordResetToken: null,
-    passwordResetExpires: null,
-  });
 
   res.status(200).json({ data: { success: true }, message: "Password reset. You can now sign in." });
 }
@@ -181,11 +211,9 @@ export async function changePassword(req: Request, res: Response): Promise<void>
   if (typeof currentPassword !== "string" || currentPassword === "") {
     throw new HttpError(400, "currentPassword is required");
   }
-  if (typeof newPassword !== "string" || newPassword.length < 8) {
-    throw new HttpError(400, "new password must be at least 8 characters");
-  }
+  const validNewPassword = validatePassword(newPassword, "new password");
 
-  const user = await UserModel.findById(authReq.user?.sub);
+  const user = await UserModel.findById(authReq.user?.sub).select("+passwordHash");
   if (!user) {
     throw new HttpError(404, "User not found");
   }
@@ -197,8 +225,11 @@ export async function changePassword(req: Request, res: Response): Promise<void>
     throw new HttpError(400, "Current password is incorrect");
   }
 
-  user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+  user.passwordHash = await bcrypt.hash(validNewPassword, BCRYPT_ROUNDS);
+  user.sessionVersion += 1;
   await user.save();
+
+  issueToken(res, toSafeUser(user.toObject()), user.sessionVersion);
 
   res.status(200).json({ data: { success: true }, message: "Password updated." });
 }
@@ -209,7 +240,7 @@ export async function me(req: Request, res: Response): Promise<void> {
     res.status(200).json({ data: null });
     return;
   }
-  let payload: { sub: string };
+  let payload: { sub: string; ver?: number };
   try {
     payload = verifyToken(token);
   } catch {
@@ -218,10 +249,10 @@ export async function me(req: Request, res: Response): Promise<void> {
     return;
   }
   const user = await UserModel.findById(payload.sub).lean();
-  if (!user) {
+  if (!user || (payload.ver ?? 0) !== (user.sessionVersion ?? 0)) {
     clearAuthCookie(res);
     res.status(200).json({ data: null });
     return;
   }
-  res.status(200).json({ data: toSafeUser(user), csrfToken: getServerCsrf() });
+  res.status(200).json({ data: toSafeUser(user), csrfToken: getServerCsrf(req, res) });
 }

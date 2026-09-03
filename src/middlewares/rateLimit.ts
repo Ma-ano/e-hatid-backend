@@ -27,12 +27,12 @@ export function rateLimit(options: { windowMs?: number; max?: number; message?: 
   }, windowMs);
   sweep.unref?.();
 
-  return function rateLimitMiddleware(req: Request, _res: Response, next: NextFunction): void {
-    const ip =
-      (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
-      req.socket.remoteAddress ||
-      "unknown";
-    const key = `${ip}|${req.method} ${req.baseUrl}${req.path}`;
+  return function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
+    // Express only consults forwarding headers when `trust proxy` is explicitly
+    // configured. Reading X-Forwarded-For directly lets clients evade limits.
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    const routePattern = typeof req.route?.path === "string" ? req.route.path : req.path;
+    const key = `${ip}|${req.method} ${req.baseUrl}${routePattern}`;
     const now = Date.now();
 
     let bucket = buckets.get(key);
@@ -47,6 +47,7 @@ export function rateLimit(options: { windowMs?: number; max?: number; message?: 
       // Do not keep counting beyond the limit; drop the oldest to stay bounded.
       bucket.timestamps.sort((a, b) => b - a);
       bucket.timestamps.pop();
+      res.setHeader("Retry-After", Math.ceil(windowMs / 1000));
       throw new HttpError(429, message);
     }
 

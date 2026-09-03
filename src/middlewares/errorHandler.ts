@@ -11,7 +11,7 @@ export class HttpError extends Error {
 }
 
 export function notFoundHandler(req: Request, res: Response, _next: NextFunction): void {
-  res.status(404).json({ error: { message: `Route not found: ${req.method} ${req.originalUrl}` } });
+  res.status(404).json({ success: false, error: { code: "ROUTE_NOT_FOUND", message: `Route not found: ${req.method} ${req.originalUrl}` } });
 }
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
@@ -19,17 +19,23 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   const isHttpError = err instanceof HttpError;
 
   // Map common Mongoose errors to 4xx so validation failures don't read as 500s.
-  let message = err instanceof Error ? err.message : "Internal Server Error";
+  let message = isHttpError ? err.message : "Internal Server Error";
+  let code = isHttpError ? "REQUEST_FAILED" : "INTERNAL_ERROR";
   if (typeof err === "object" && err !== null) {
     const e = err as { name?: string; code?: number };
-    if (e.name === "ValidationError" || e.name === "CastError" || e.name === "MongoServerError") {
+    if (e.name === "ValidationError" || e.name === "CastError") {
       statusCode = statusCode === 500 ? 400 : statusCode;
-      message = e.name === "MongoServerError" && e.code === 11000 ? "A record with that value already exists" : message;
+      message = "Invalid request data";
+      code = "VALIDATION_ERROR";
+    } else if (e.name === "MongoServerError" && e.code === 11000) {
+      statusCode = statusCode === 500 ? 409 : statusCode;
+      message = "A record with that value already exists";
+      code = "DUPLICATE_RECORD";
     }
   }
 
-  if (process.env.NODE_ENV !== "test" && (statusCode >= 500 || !isHttpError)) {
+  if (process.env.NODE_ENV !== "test" && statusCode >= 500) {
     console.error(err);
   }
-  res.status(statusCode).json({ error: { message } });
+  res.status(statusCode).json({ success: false, error: { code, message } });
 }

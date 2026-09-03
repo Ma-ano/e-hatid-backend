@@ -23,7 +23,7 @@ export async function listNotifications(req: Request, res: Response): Promise<vo
   if (roles.includes("vendor")) or.push({ vendorId: user.sub });
   if (roles.includes("rider")) or.push({ riderId: user.sub });
 
-  const notifications = await NotificationModel.find({ $or: or }).sort({ createdAt: -1 }).lean();
+  const notifications = await NotificationModel.find({ $or: or }).sort({ createdAt: -1 }).limit(200).lean();
   const unread = notifications.filter((n) => !n.read).length;
   res.status(200).json({ data: notifications, unreadCount: unread });
 }

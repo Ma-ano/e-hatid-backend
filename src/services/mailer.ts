@@ -36,9 +36,13 @@ export interface MailMessage {
 export async function sendMail(message: MailMessage): Promise<{ delivered: boolean; method: string }> {
   const t = getTransporter();
   if (!t) {
-    console.log(`[mail:console] To: ${message.to}`);
-    console.log(`[mail:console] Subject: ${message.subject}`);
-    console.log(`[mail:console] Body: ${message.text}`);
+    if (env.isProduction) {
+      console.error("[mail] SMTP is not configured; message was not delivered");
+    } else {
+      console.log(`[mail:console] To: ${message.to}`);
+      console.log(`[mail:console] Subject: ${message.subject}`);
+      console.log(`[mail:console] Body: ${message.text}`);
+    }
     return { delivered: false, method: "console" };
   }
   try {
@@ -51,10 +55,12 @@ export async function sendMail(message: MailMessage): Promise<{ delivered: boole
     });
     return { delivered: true, method: "smtp" };
   } catch (err) {
-    console.error("[mail] SMTP send failed, logging instead:", err);
-    console.log(`[mail:console] To: ${message.to}`);
-    console.log(`[mail:console] Subject: ${message.subject}`);
-    console.log(`[mail:console] Body: ${message.text}`);
+    console.error("[mail] SMTP send failed:", err);
+    if (!env.isProduction) {
+      console.log(`[mail:console] To: ${message.to}`);
+      console.log(`[mail:console] Subject: ${message.subject}`);
+      console.log(`[mail:console] Body: ${message.text}`);
+    }
     return { delivered: false, method: "console" };
   }
 }

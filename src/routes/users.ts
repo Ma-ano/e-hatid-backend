@@ -23,7 +23,7 @@ export const usersRouter = Router();
 usersRouter.get("/me", requireAuth, getMe);
 usersRouter.put("/me", requireAuth, csrfProtect, updateMe);
 usersRouter.post("/me/apply-role", requireAuth, csrfProtect, applyForRole);
-usersRouter.put("/me/availability", requireAuth, csrfProtect, setAvailability);
+usersRouter.put("/me/availability", requireAuth, requireRole("rider"), csrfProtect, setAvailability);
 
 // Own address book (spec §25)
 usersRouter.get("/me/addresses", requireAuth, listAddresses);

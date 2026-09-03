@@ -1,6 +1,7 @@
 import { HttpError } from "../middlewares/errorHandler.js";
 import { OrderModel } from "../models/order.js";
 import { PromoModel, type Promo, type PromoType } from "../models/promo.js";
+import { PromoRedemptionModel } from "../models/promoRedemption.js";
 
 export interface PromoContext {
   code: string;
@@ -20,8 +21,10 @@ export interface PromoSummary {
   discountLabel: string;
 }
 
+type StoredPromo = Promo & { _id: unknown };
+
 export interface PromoResult {
-  promo: Promo;
+  promo: StoredPromo;
   type: PromoType;
   discount: number;
 }
@@ -54,11 +57,11 @@ function isInWindow(promo: Promo): boolean {
   return true;
 }
 
-export async function findQualifiedPromo(ctx: PromoContext): Promise<Promo | null> {
+export async function findQualifiedPromo(ctx: PromoContext): Promise<StoredPromo | null> {
   const code = ctx.code.trim().toUpperCase();
   if (!code) return null;
   const promo = await PromoModel.findOne({ code }).lean();
-  return promo ?? null;
+  return promo as StoredPromo | null;
 }
 
 export async function validatePromo(ctx: PromoContext, deliveryFee = 0): Promise<PromoResult> {
@@ -86,6 +89,91 @@ export async function validatePromo(ctx: PromoContext, deliveryFee = 0): Promise
   }
 
   return { promo, type: promo.type, discount: discountFor(promo, ctx.subtotal, deliveryFee) };
+}
+
+export interface PromoReservation {
+  promoId: string;
+  userId: string;
+  reservedForUser: boolean;
+}
+
+/** Atomically reserve global and per-user promo capacity before creating an order. */
+export async function reservePromoUse(
+  promo: StoredPromo,
+  userId: string,
+): Promise<PromoReservation> {
+  const promoId = String(promo._id);
+  const perUserLimit = promo.perUserLimit ?? 1;
+  let reservedForUser = false;
+
+  if (perUserLimit > 0) {
+    const existingCounter = await PromoRedemptionModel.findOneAndUpdate(
+      { promoId, userId, count: { $lt: perUserLimit } },
+      { $inc: { count: 1 } },
+      { new: true },
+    ).lean();
+
+    if (existingCounter) {
+      reservedForUser = true;
+    } else {
+      const historicalCount = await OrderModel.countDocuments({ userId, promoCode: promo.code });
+      if (historicalCount >= perUserLimit) {
+        throw new HttpError(409, "You have already used this promo code");
+      }
+      try {
+        await PromoRedemptionModel.create({ promoId, userId, count: historicalCount + 1 });
+        reservedForUser = true;
+      } catch (err) {
+        if (!(typeof err === "object" && err !== null && (err as { code?: number }).code === 11000)) {
+          throw err;
+        }
+        const racedCounter = await PromoRedemptionModel.findOneAndUpdate(
+          { promoId, userId, count: { $lt: perUserLimit } },
+          { $inc: { count: 1 } },
+          { new: true },
+        ).lean();
+        if (!racedCounter) throw new HttpError(409, "You have already used this promo code");
+        reservedForUser = true;
+      }
+    }
+  }
+
+  const globalReservation = await PromoModel.updateOne(
+    {
+      _id: promo._id,
+      active: true,
+      $or: [
+        { usageLimit: { $lte: 0 } },
+        { $expr: { $lt: ["$usedCount", "$usageLimit"] } },
+      ],
+    },
+    { $inc: { usedCount: 1 } },
+  );
+  if (globalReservation.modifiedCount !== 1) {
+    if (reservedForUser) {
+      await PromoRedemptionModel.updateOne(
+        { promoId, userId, count: { $gt: 0 } },
+        { $inc: { count: -1 } },
+      );
+    }
+    throw new HttpError(409, "This promo code has just reached its usage limit");
+  }
+
+  return { promoId, userId, reservedForUser };
+}
+
+/** Release a reservation when order creation fails before it commits. */
+export async function releasePromoUse(reservation: PromoReservation): Promise<void> {
+  await PromoModel.updateOne(
+    { _id: reservation.promoId, usedCount: { $gt: 0 } },
+    { $inc: { usedCount: -1 } },
+  );
+  if (reservation.reservedForUser) {
+    await PromoRedemptionModel.updateOne(
+      { promoId: reservation.promoId, userId: reservation.userId, count: { $gt: 0 } },
+      { $inc: { count: -1 } },
+    );
+  }
 }
 
 /** Same validation but returns a friendly response for the checkout preview call. */

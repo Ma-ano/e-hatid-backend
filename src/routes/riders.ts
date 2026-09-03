@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { csrfProtect, requireAuth, requireRole } from "../middlewares/auth.js";
 
 import {
   createRider,
@@ -10,8 +11,9 @@ import {
 
 export const ridersRouter = Router();
 
+ridersRouter.use(requireAuth, requireRole("admin"));
 ridersRouter.get("/", listRiders);
 ridersRouter.get("/:id", getRider);
-ridersRouter.post("/", createRider);
-ridersRouter.put("/:id", updateRider);
-ridersRouter.delete("/:id", deleteRider);
+ridersRouter.post("/", csrfProtect, createRider);
+ridersRouter.put("/:id", csrfProtect, updateRider);
+ridersRouter.delete("/:id", csrfProtect, deleteRider);

@@ -38,11 +38,11 @@ export async function createBatchReview(input: {
 }
 
 export async function listMyBatchReviews(riderId: string) {
-  return RiderBatchReviewModel.find({ riderId }).sort({ createdAt: -1 }).lean();
+  return RiderBatchReviewModel.find({ riderId }).sort({ createdAt: -1 }).limit(200).lean();
 }
 
 export async function listAllBatchReviews() {
-  return RiderBatchReviewModel.find().sort({ createdAt: -1 }).lean();
+  return RiderBatchReviewModel.find().sort({ createdAt: -1 }).limit(500).lean();
 }
 
 /** Rider may delete their own review; admins may delete any review. */

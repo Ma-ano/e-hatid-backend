@@ -40,9 +40,9 @@ async function distanceFromGeo(
   dropLng: number,
 ): Promise<number> {
   const url = `${env.geoServiceUrl.replace(/\/$/, "")}/api/v1/distance`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), env.geoDistanceTimeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), env.geoDistanceTimeoutMs);
     const resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -52,14 +52,18 @@ async function distanceFromGeo(
       }),
       signal: controller.signal,
     });
-    clearTimeout(timer);
     if (!resp.ok) {
       throw new Error(`geo service returned ${resp.status}`);
     }
     const json = (await resp.json()) as { data?: { distance_km?: number } };
-    return Number(json.data?.distance_km ?? 0);  } catch (err) {
+    const distance = Number(json.data?.distance_km);
+    if (!Number.isFinite(distance) || distance < 0) throw new Error("geo service returned an invalid distance");
+    return distance;
+  } catch (err) {
     console.warn("[fee] geo service unavailable, using haversine fallback:", err);
     return haversineKm(pickupLat, pickupLng, dropLat, dropLng);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -92,7 +96,7 @@ export async function estimateDeliveryFee(input: DeliveryFeeInput): Promise<Deli
   const cfg = await getConfig();
   const rate = cfg.perKmRate ?? 0;
   const gas = cfg.gasPrice ?? 0;
-  const kmPerL = cfg.kmPerLiter || 1;
+  const kmPerL = cfg.kmPerLiter && cfg.kmPerLiter > 0 ? cfg.kmPerLiter : 1;
   const bonus = cfg.bonus ?? 0;
 
   // system.md §8.4 formula:

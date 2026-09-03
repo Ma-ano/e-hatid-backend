@@ -22,7 +22,7 @@ const issuer = new OtpIssuer(async (email, otp) => {
 });
 
 function ipOf(req: Request): string {
-  return (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() || req.ip || "";
+  return req.ip || req.socket.remoteAddress || "";
 }
 
 /**
@@ -44,7 +44,7 @@ export async function requestOtp(req: Request, res: Response): Promise<void> {
     userId,
     ip: ipOf(req),
     userAgent: (req.headers["user-agent"] as string) || "",
-    insecure: purpose === "demo" || normalized === "rider@ehatid.com",
+    insecure: env.allowInsecureDemoOtp && purpose === "demo",
   });
 
   // In non-production, demo requests also get the code echoed back on-screen so
@@ -55,7 +55,7 @@ export async function requestOtp(req: Request, res: Response): Promise<void> {
   res.status(200).json({
     data: {
       email: normalized,
-      expiresIn: 300,
+      expiresIn: env.otpTtlSeconds,
       demoOtp: echoDemo ? result.otp : undefined,
     },
     message: `Verification code sent${echoDemo ? " (demo mode: code shown below)" : ""}`,

@@ -14,6 +14,7 @@ const riderLocationSchema = new Schema(
 );
 
 riderLocationSchema.index({ location: "2dsphere" });
+riderLocationSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 24 * 60 * 60 });
 
 export type RiderLocation = InferSchemaType<typeof riderLocationSchema>;
 export const RiderLocationModel = model("RiderLocation", riderLocationSchema);

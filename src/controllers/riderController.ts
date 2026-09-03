@@ -5,7 +5,7 @@ import { HttpError } from "../middlewares/errorHandler.js";
 import { RiderModel } from "../models/rider.js";
 
 export async function listRiders(_req: Request, res: Response): Promise<void> {
-  const riders = await RiderModel.find().sort({ createdAt: -1 }).lean();
+  const riders = await RiderModel.find().sort({ createdAt: -1 }).limit(500).lean();
   res.status(200).json({ data: riders });
 }
 

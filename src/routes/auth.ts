@@ -24,5 +24,5 @@ authRouter.post("/forgot-password", authLimiter, forgotPassword);
 authRouter.post("/reset-password", authLimiter, resetPassword);
 
 // Authed + CSRF-protected
-authRouter.post("/logout", csrfProtect, logout);
+authRouter.post("/logout", requireAuth, csrfProtect, logout);
 authRouter.put("/change-password", requireAuth, csrfProtect, changePassword);

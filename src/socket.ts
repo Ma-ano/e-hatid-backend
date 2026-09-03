@@ -1,14 +1,15 @@
 import { Server, type Socket } from "socket.io";
 import type { Server as HttpServer } from "http";
-import jwt from "jsonwebtoken";
 import { env } from "./config/env.js";
 import { UserModel } from "./models/user.js";
 import { OrderModel } from "./models/order.js";
+import { verifyToken } from "./services/authService.js";
 
 interface AuthUser {
   sub: string;
   role: string;
   activeRole: string;
+  ver?: number;
 }
 
 let io: Server;
@@ -32,11 +33,14 @@ export function initSocket(server: HttpServer): Server {
       if (!token) {
         return next(new Error("Authentication required"));
       }
-      const payload = jwt.verify(token, env.jwtSecret as string) as unknown as AuthUser;
+      const payload = verifyToken(token) as AuthUser;
 
       const user = await UserModel.findById(payload.sub).lean();
       if (!user) {
         return next(new Error("User not found"));
+      }
+      if ((payload.ver ?? 0) !== (user.sessionVersion ?? 0)) {
+        return next(new Error("Session expired"));
       }
 
       socket.data.userId = String(user._id);
@@ -58,10 +62,11 @@ export function initSocket(server: HttpServer): Server {
 
         // Authorization: user must be the rider, or have an order assigned to this rider, or be admin
         if (!isAdmin) {
-          const isRider = userId === riderId;
+          const isRider = roles.includes("rider") && userId === riderId;
           if (!isRider) {
             const hasOrder = await OrderModel.findOne({
               riderId,
+              status: "delivering",
               $or: [{ userId }, { vendorId: userId }],
             }).lean();
             if (!hasOrder) return;

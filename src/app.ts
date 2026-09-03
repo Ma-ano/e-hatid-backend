@@ -10,19 +10,28 @@ import "express-async-errors";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler.js";
 import { env } from "./config/env.js";
+import { rejectUnsafeBody } from "./middlewares/requestValidation.js";
 
 export function createApp(): express.Express {
   const app = express();
 
   app.disable("x-powered-by");
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: false }));
+  app.set("query parser", "simple");
+  if (env.trustProxyHops > 0) {
+    app.set("trust proxy", env.trustProxyHops);
+  }
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: false, limit: "1mb" }));
   app.use(cookieParser());
+  app.use(rejectUnsafeBody);
 
   // Allow the Vite dev server (and later the deployed web origin) to send cookies.
   app.use((_req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", env.clientOrigin);
     res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Cache-Control", "no-store");
     res.setHeader(
       "Access-Control-Allow-Headers",
       "Content-Type, Authorization, x-csrf-token",

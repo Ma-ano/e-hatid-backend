@@ -76,14 +76,15 @@ export async function upsertRiderLocationByOrder(req: Request, res: Response): P
   }
 
   const order = await OrderModel.findById(orderId).lean();
+  if (!order) throw new HttpError(404, "Order not found");
   const authUser = await UserModel.findById(user.sub).lean();
   const isAdmin = (authUser?.roles ?? []).includes("admin");
-  const isRiderOnOrder = order && order.riderId === user.sub;
+  const isRiderOnOrder = order.riderId === user.sub && order.status === "delivering";
   if (!isAdmin && !isRiderOnOrder) {
     throw new HttpError(403, "You can only report location on an order you are delivering");
   }
 
-  const effectiveRiderId = order?.riderId ?? user.sub;
+  const effectiveRiderId = order.riderId ?? user.sub;
 
   const location = await RiderLocationModel.findOneAndUpdate(
     { riderId: effectiveRiderId },
@@ -124,6 +125,10 @@ export async function getOrderRiderLocation(req: Request, res: Response): Promis
   const isParty = order.userId === user.sub || order.vendorId === user.sub || order.riderId === user.sub;
   if (!isAdmin && !isParty) {
     throw new HttpError(403, "You do not have access to this order");
+  }
+  if (!isAdmin && order.status !== "delivering") {
+    res.status(200).json({ data: null });
+    return;
   }
 
   const riderId = order.riderId;

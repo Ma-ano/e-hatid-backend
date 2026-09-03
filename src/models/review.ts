@@ -15,6 +15,10 @@ const reviewSchema = new Schema(
 );
 
 reviewSchema.index({ stallId: 1, createdAt: -1 });
+reviewSchema.index(
+  { orderId: 1 },
+  { unique: true, partialFilterExpression: { orderId: { $type: "string" } } },
+);
 
 export type Review = InferSchemaType<typeof reviewSchema>;
 export const ReviewModel = model("Review", reviewSchema);

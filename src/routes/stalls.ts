@@ -20,6 +20,6 @@ stallsRouter.get("/:id", getStall);
 
 // Vendor manages own stalls (role approved) — strict route order.
 stallsRouter.post("/", requireAuth, requireRole("vendor"), csrfProtect, createStall);
-stallsRouter.put("/:id/menu", requireAuth, requireRole("vendor"), csrfProtect, updateStallMenu);
-stallsRouter.put("/:id", requireAuth, requireRole("vendor"), csrfProtect, updateStall);
+stallsRouter.put("/:id/menu", requireAuth, requireRole("vendor", "admin"), csrfProtect, updateStallMenu);
+stallsRouter.put("/:id", requireAuth, requireRole("vendor", "admin"), csrfProtect, updateStall);
 stallsRouter.delete("/:id", requireAuth, requireRole("admin"), csrfProtect, deleteStall);

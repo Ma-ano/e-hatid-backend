@@ -5,11 +5,16 @@ import { OrderModel, type OrderStatus } from "../models/order.js";
 import { StallModel } from "../models/stall.js";
 import { UserModel } from "../models/user.js";
 import { estimateDeliveryFee } from "../services/deliveryFeeService.js";
-import { validatePromo } from "../services/promoService.js";
-import { PromoModel } from "../models/promo.js";
+import {
+  releasePromoUse,
+  reservePromoUse,
+  validatePromo,
+  type PromoReservation,
+} from "../services/promoService.js";
 import { pushNotification } from "../services/notificationService.js";
 import { logAudit } from "../services/auditLogService.js";
 import { getIO } from "../socket.js";
+import { createHash } from "node:crypto";
 
 interface AuthUser {
   sub: string;
@@ -34,6 +39,20 @@ const VALID_STATUSES: OrderStatus[] = [
   "ready_for_pickup",
 ];
 
+const MAX_DISTINCT_ITEMS = 100;
+const MAX_ITEM_QUANTITY = 99;
+const MAX_TEXT_LENGTH = 500;
+
+function fingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function withoutInternalFields(order: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...order };
+  delete result.idempotencyFingerprint;
+  return result;
+}
+
 export async function createOrder(req: Request, res: Response): Promise<void> {
   const user = getUser(req);
   if (!user) throw new HttpError(401, "Authentication required");
@@ -51,13 +70,38 @@ export async function createOrder(req: Request, res: Response): Promise<void> {
     paymentMethod?: unknown;
   };
   const { stallId, items } = body;
+
+  const rawIdempotencyKey = req.headers["x-idempotency-key"];
+  if (typeof rawIdempotencyKey !== "string" || rawIdempotencyKey.trim() === "") {
+    throw new HttpError(400, "x-idempotency-key header is required");
+  }
+  const idempotencyKey = rawIdempotencyKey.trim();
+  if (idempotencyKey.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(idempotencyKey)) {
+    throw new HttpError(400, "x-idempotency-key is invalid");
+  }
+  const requestFingerprint = fingerprint(body);
+  const existing = await OrderModel.findOne({ userId: user.sub, idempotencyKey })
+    .select("+idempotencyFingerprint")
+    .lean();
+  if (existing) {
+    if (existing.idempotencyFingerprint && existing.idempotencyFingerprint !== requestFingerprint) {
+      throw new HttpError(409, "This idempotency key was already used for a different order");
+    }
+    res.status(200).json({ data: withoutInternalFields(existing), message: "Order already exists for this request" });
+    return;
+  }
+
   if (typeof stallId !== "string" || stallId === "") throw new HttpError(400, "stallId required");
   if (!Array.isArray(items) || items.length === 0) {
     throw new HttpError(400, "items must be a non-empty array");
   }
+  if (items.length > MAX_DISTINCT_ITEMS) {
+    throw new HttpError(400, `items cannot contain more than ${MAX_DISTINCT_ITEMS} entries`);
+  }
 
-const stall = await StallModel.findById(stallId).lean();
+  const stall = await StallModel.findById(stallId).lean();
   if (!stall) throw new HttpError(404, "Stall not found");
+  if (!stall.active) throw new HttpError(409, "This stall is currently unavailable");
 
   const orderUser = await UserModel.findById(user.sub).lean();
   if (!orderUser) throw new HttpError(404, "User not found");
@@ -94,10 +138,30 @@ const stall = await StallModel.findById(stallId).lean();
   for (const raw of items) {
     const it = (raw && typeof raw === "object" ? raw : {}) as IncomingItem;
     const menuItemId = typeof it.menuItemId === "string" ? it.menuItemId : "";
-    const quantity =
-      typeof it.quantity === "number" && it.quantity > 0 ? Math.floor(it.quantity) : 1;
+    if (
+      typeof it.quantity !== "number" ||
+      !Number.isInteger(it.quantity) ||
+      it.quantity < 1 ||
+      it.quantity > MAX_ITEM_QUANTITY
+    ) {
+      throw new HttpError(400, `quantity must be an integer between 1 and ${MAX_ITEM_QUANTITY}`);
+    }
+    const quantity = it.quantity;
 
-    const menuItem = (menu as { id?: unknown; name?: unknown; price?: unknown; available?: unknown; options?: { choices?: { name?: unknown; price?: unknown }[] }[]; addOns?: { name?: unknown; price?: unknown }[] }[]).find(
+    const menuItem = (menu as {
+      id?: unknown;
+      name?: unknown;
+      price?: unknown;
+      image?: unknown;
+      available?: unknown;
+      options?: {
+        name?: unknown;
+        required?: unknown;
+        maxSelections?: unknown;
+        choices?: { name?: unknown; price?: unknown }[];
+      }[];
+      addOns?: { name?: unknown; price?: unknown }[];
+    }[]).find(
       (m) => String(m.id) === menuItemId,
     );
     if (!menuItem) {
@@ -109,25 +173,66 @@ const stall = await StallModel.findById(stallId).lean();
     }
 
     let unitPrice = Number(menuItem.price ?? 0);
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+      throw new HttpError(409, `"${String(menuItem.name ?? menuItemId)}" has an invalid price`);
+    }
 
-    const opts =
-      Array.isArray(it.selectedOptions)
-        ? (it.selectedOptions as unknown[]).filter((s): s is string => typeof s === "string")
-        : [];
+    if (it.selectedOptions !== undefined && !Array.isArray(it.selectedOptions)) {
+      throw new HttpError(400, "selectedOptions must be an array");
+    }
+    const rawOptions = (it.selectedOptions ?? []) as unknown[];
+    if (!rawOptions.every((option): option is string => typeof option === "string")) {
+      throw new HttpError(400, "selectedOptions must contain only strings");
+    }
+    const opts = [...new Set(rawOptions)];
+    if (opts.length !== rawOptions.length) {
+      throw new HttpError(400, "selectedOptions cannot contain duplicates");
+    }
+    for (const group of menuItem.options ?? []) {
+      const choices = group.choices ?? [];
+      const selectedCount = opts.filter((label) => choices.some((choice) => choice.name === label)).length;
+      const maxSelections = Number(group.maxSelections ?? 1);
+      if (!Number.isInteger(maxSelections) || maxSelections < 1) {
+        throw new HttpError(409, `"${String(menuItem.name ?? menuItemId)}" has invalid option settings`);
+      }
+      if (group.required && selectedCount === 0) {
+        throw new HttpError(400, `Please choose an option for ${String(group.name ?? "this item")}`);
+      }
+      if (selectedCount > maxSelections) {
+        throw new HttpError(400, `Too many selections for ${String(group.name ?? "this item")}`);
+      }
+    }
     for (const label of opts) {
       const choice = (menuItem.options ?? [])
         .flatMap((g) => g.choices ?? [])
         .find((c) => c.name === label);
-      if (choice) unitPrice += Number(choice.price ?? 0);
+      if (!choice) throw new HttpError(400, `Unknown option: ${label}`);
+      const optionPrice = Number(choice.price ?? 0);
+      if (!Number.isFinite(optionPrice) || optionPrice < 0) {
+        throw new HttpError(409, `"${String(menuItem.name ?? menuItemId)}" has an invalid option price`);
+      }
+      unitPrice += optionPrice;
     }
 
-    const addOns =
-      Array.isArray(it.selectedAddOns)
-        ? (it.selectedAddOns as unknown[]).filter((s): s is string => typeof s === "string")
-        : [];
+    if (it.selectedAddOns !== undefined && !Array.isArray(it.selectedAddOns)) {
+      throw new HttpError(400, "selectedAddOns must be an array");
+    }
+    const rawAddOns = (it.selectedAddOns ?? []) as unknown[];
+    if (!rawAddOns.every((addOn): addOn is string => typeof addOn === "string")) {
+      throw new HttpError(400, "selectedAddOns must contain only strings");
+    }
+    const addOns = [...new Set(rawAddOns)];
+    if (addOns.length !== rawAddOns.length) {
+      throw new HttpError(400, "selectedAddOns cannot contain duplicates");
+    }
     for (const label of addOns) {
       const addOn = (menuItem.addOns ?? []).find((a) => a.name === label);
-      if (addOn) unitPrice += Number(addOn.price ?? 0);
+      if (!addOn) throw new HttpError(400, `Unknown add-on: ${label}`);
+      const addOnPrice = Number(addOn.price ?? 0);
+      if (!Number.isFinite(addOnPrice) || addOnPrice < 0) {
+        throw new HttpError(409, `"${String(menuItem.name ?? menuItemId)}" has an invalid add-on price`);
+      }
+      unitPrice += addOnPrice;
     }
 
     const unit = Math.round(unitPrice * 100) / 100;
@@ -138,29 +243,50 @@ const stall = await StallModel.findById(stallId).lean();
       name: String(menuItem.name ?? menuItemId),
       price: unit,
       quantity,
-      image: typeof it.image === "string" ? it.image : "",
+      image: typeof menuItem.image === "string" ? menuItem.image : "",
       selectedOptions: opts,
       selectedAddOns: addOns,
-      specialInstructions: typeof it.specialInstructions === "string" ? it.specialInstructions : "",
+      specialInstructions:
+        typeof it.specialInstructions === "string"
+          ? it.specialInstructions.trim().slice(0, MAX_TEXT_LENGTH)
+          : "",
     });
   }
 
   subtotal = Math.round(subtotal * 100) / 100;
+  if (subtotal < Number(stall.minOrder ?? 0)) {
+    throw new HttpError(400, `Minimum order is ₱${Number(stall.minOrder ?? 0).toFixed(2)}`);
+  }
 
-  const toNullableNumber = (v: unknown): number | null =>
-    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const toCoordinate = (v: unknown, kind: "latitude" | "longitude"): number | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw new HttpError(400, `${kind} must be a finite number`);
+    }
+    const limit = kind === "latitude" ? 90 : 180;
+    if (v < -limit || v > limit) {
+      throw new HttpError(400, `${kind} is outside its valid range`);
+    }
+    return v;
+  };
 
   // Parse deliveryLocation from the request body (prompt1.md spec)
   const rawDeliveryLocation = body.deliveryLocation;
-  let deliveryLocation = null;
+  let deliveryLocation: {
+    fullAddress: string;
+    location: { type: "Point"; coordinates: [number, number] } | null;
+    deliveryInstructions: string;
+  } | null = null;
   let deliveryInstructionsFromLocation = "";
   if (rawDeliveryLocation && typeof rawDeliveryLocation === "object" && !Array.isArray(rawDeliveryLocation)) {
     const dlObj = rawDeliveryLocation as Record<string, unknown>;
     const fullAddress = typeof dlObj.fullAddress === "string" ? dlObj.fullAddress.trim() : "";
+    if (fullAddress.length > MAX_TEXT_LENGTH) throw new HttpError(400, "Delivery address is too long");
     const instructions = typeof dlObj.deliveryInstructions === "string" ? dlObj.deliveryInstructions.trim() : "";
+    if (instructions.length > MAX_TEXT_LENGTH) throw new HttpError(400, "Delivery instructions are too long");
     deliveryInstructionsFromLocation = instructions;
 
-    let locationGeo = null;
+    let locationGeo: { type: "Point"; coordinates: [number, number] } | null = null;
     const rawLoc = dlObj.location;
     if (rawLoc && typeof rawLoc === "object" && !Array.isArray(rawLoc)) {
       const locObj = rawLoc as Record<string, unknown>;
@@ -170,7 +296,11 @@ const stall = await StallModel.findById(stallId).lean();
         const lat = Number(coords[1]);
         if (Number.isFinite(lng) && Number.isFinite(lat) && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90) {
           locationGeo = { type: "Point", coordinates: [lng, lat] };
+        } else {
+          throw new HttpError(400, "Invalid delivery location coordinates");
         }
+      } else {
+        throw new HttpError(400, "deliveryLocation.location must contain two coordinates");
       }
     }
 
@@ -181,8 +311,29 @@ const stall = await StallModel.findById(stallId).lean();
     };
   }
 
-  const customerLat = toNullableNumber(body.customerLatitude);
-  const customerLng = toNullableNumber(body.customerLongitude);
+  let customerLat = toCoordinate(body.customerLatitude, "latitude");
+  let customerLng = toCoordinate(body.customerLongitude, "longitude");
+  if ((customerLat === null) !== (customerLng === null)) {
+    throw new HttpError(400, "Both customerLatitude and customerLongitude are required together");
+  }
+  if (deliveryLocation?.location) {
+    const [locationLng, locationLat] = deliveryLocation.location.coordinates;
+    if (customerLat === null && customerLng === null) {
+      customerLat = locationLat;
+      customerLng = locationLng;
+    } else if (
+      customerLat !== null &&
+      customerLng !== null &&
+      (Math.abs(customerLat - locationLat) > 0.0001 || Math.abs(customerLng - locationLng) > 0.0001)
+    ) {
+      throw new HttpError(400, "Delivery coordinates do not match the selected location");
+    }
+  }
+
+  const fallbackAddress = typeof body.deliveryAddress === "string" ? body.deliveryAddress.trim() : "";
+  if (fallbackAddress.length > MAX_TEXT_LENGTH) throw new HttpError(400, "Delivery address is too long");
+  const deliveryAddress = deliveryLocation?.fullAddress || fallbackAddress;
+  if (!deliveryAddress) throw new HttpError(400, "A delivery address is required");
 
   // Compute the delivery fee through the fee engine (geo service + config).
   // The client-sent `distance` is deliberately ignored (prompt1.md §34): a
@@ -211,6 +362,7 @@ const stall = await StallModel.findById(stallId).lean();
   // recomputed server-side; the client-supplied amount is never trusted.
   let discount = 0;
   let promoCode = "";
+  let appliedPromo: Parameters<typeof reservePromoUse>[0] | null = null;
   const rawPromo = body.promoCode;
   if (typeof rawPromo === "string" && rawPromo.trim() !== "") {
     const promo = await validatePromo(
@@ -219,21 +371,21 @@ const stall = await StallModel.findById(stallId).lean();
     );
     discount = promo.discount;
     promoCode = promo.promo.code;
+    appliedPromo = promo.promo;
   }
 
   // Payment method is validated server-side. E-Hatid currently supports COD only;
   // any other value is rejected so unsupported methods can never be recorded.
-  const paymentMethod = body.paymentMethod === "cod" ? "cod" : "cod";
+  if (body.paymentMethod !== undefined && body.paymentMethod !== "cod") {
+    throw new HttpError(400, "Unsupported payment method");
+  }
+  const paymentMethod = "cod";
 
   // Idempotency: if the client retries a request (e.g. after a dropped response),
   // serve the same order instead of creating a duplicate.
-  const idempotencyKey = (req.headers["x-idempotency-key"] as string | undefined) ?? "";
-  if (idempotencyKey !== "") {
-    const existing = await OrderModel.findOne({ userId: user.sub, idempotencyKey }).lean();
-    if (existing) {
-      res.status(200).json({ data: existing, message: "Order already exists for this request" });
-      return;
-    }
+  let promoReservation: PromoReservation | null = null;
+  if (appliedPromo) {
+    promoReservation = await reservePromoUse(appliedPromo, user.sub);
   }
 
   // Estimated delivery window (minutes), derived from the authoritative distance.
@@ -242,54 +394,71 @@ const stall = await StallModel.findById(stallId).lean();
   const etaMinutes = distance > 0 ? Math.round(ETA_BASE_MIN + distance * ETA_PER_KM_MIN) : ETA_BASE_MIN;
   const estimatedDeliveryTime = `${etaMinutes}-${Math.min(etaMinutes + 10, 90)} min`;
 
-  const order = await OrderModel.create({
-    userId: user.sub,
-    stallId: String(stall._id),
-    vendorId: stall.vendorId,
-    stallName: stall.name,
-    customerName: orderUser.name,
-    customerPhone: orderUser.phone,
-    items: validatedItems,
-    subtotal,
-    deliveryFee,
-    serviceFee,
-    discount,
-    promoCode,
-    total: Math.round((subtotal + deliveryFee + serviceFee - discount) * 100) / 100,
-    paymentMethod,
-    paymentStatus: "unpaid",
-    deliveryLocation,
-    deliveryAddress: deliveryLocation?.fullAddress || (typeof body.deliveryAddress === "string" ? body.deliveryAddress : ""),
-    deliveryInstructions: deliveryInstructionsFromLocation || "",
-    notes: typeof body.notes === "string" ? body.notes : "",
-    distance,
-    estimatedDeliveryTime,
-    customerLatitude: customerLat,
-    customerLongitude: customerLng,
-    stallLatitude: stall.latitude ?? null,
-    stallLongitude: stall.longitude ?? null,
-    status: "pending",
-    idempotencyKey,
-  });
-
-  // Track promo redemption.
-  if (promoCode) {
-    await PromoModel.updateOne({ code: promoCode }, { $inc: { usedCount: 1 } }).catch((err) => {
-      console.warn("[promos] failed to increment usage:", err);
+  let order;
+  try {
+    order = await OrderModel.create({
+      userId: user.sub,
+      stallId: String(stall._id),
+      vendorId: stall.vendorId,
+      stallName: stall.name,
+      customerName: orderUser.name,
+      customerPhone: orderUser.phone,
+      items: validatedItems,
+      subtotal,
+      deliveryFee,
+      serviceFee,
+      discount,
+      promoCode,
+      total: Math.round((subtotal + deliveryFee + serviceFee - discount) * 100) / 100,
+      paymentMethod,
+      paymentStatus: "unpaid",
+      deliveryLocation,
+      deliveryAddress,
+      deliveryInstructions: deliveryInstructionsFromLocation || "",
+      notes: typeof body.notes === "string" ? body.notes.trim().slice(0, MAX_TEXT_LENGTH) : "",
+      distance,
+      estimatedDeliveryTime,
+      customerLatitude: customerLat,
+      customerLongitude: customerLng,
+      stallLatitude: stall.latitude ?? null,
+      stallLongitude: stall.longitude ?? null,
+      status: "pending",
+      idempotencyKey,
+      idempotencyFingerprint: requestFingerprint,
     });
+  } catch (err) {
+    if (promoReservation) {
+      await releasePromoUse(promoReservation)
+        .catch((rollbackError) => console.error("[promos] reservation rollback failed:", rollbackError));
+    }
+    if (typeof err === "object" && err !== null && (err as { code?: number }).code === 11000) {
+      const racedOrder = await OrderModel.findOne({ userId: user.sub, idempotencyKey })
+        .select("+idempotencyFingerprint")
+        .lean();
+      if (racedOrder && (!racedOrder.idempotencyFingerprint || racedOrder.idempotencyFingerprint === requestFingerprint)) {
+        res.status(200).json({ data: withoutInternalFields(racedOrder), message: "Order already exists for this request" });
+        return;
+      }
+      throw new HttpError(409, "This idempotency key was already used for a different order");
+    }
+    throw err;
   }
 
   // Notify vendor of a new incoming order.
   if (stall.vendorId) {
-    await pushNotification(
-      { vendorId: String(stall.vendorId) },
-      `New order #${String(order._id).slice(-6).toUpperCase()} from ${orderUser.name || "a customer"}`,
-      "info",
-      String(order._id),
-    );
+    try {
+      await pushNotification(
+        { vendorId: String(stall.vendorId) },
+        `New order #${String(order._id).slice(-6).toUpperCase()} from ${orderUser.name || "a customer"}`,
+        "info",
+        String(order._id),
+      );
+    } catch (err) {
+      console.warn("[orders] vendor notification failed:", err);
+    }
   }
 
-  res.status(201).json({ data: order });
+  res.status(201).json({ data: withoutInternalFields(order.toObject()) });
 }
 
 export async function getOrder(req: Request, res: Response): Promise<void> {
@@ -340,7 +509,7 @@ export async function listOrders(req: Request, res: Response): Promise<void> {
     }
   }
 
-  const orders = await OrderModel.find(query).sort({ createdAt: -1 }).lean();
+  const orders = await OrderModel.find(query).sort({ createdAt: -1 }).limit(500).lean();
   res.status(200).json({ data: orders });
 }
 
@@ -353,12 +522,18 @@ export async function listAvailableOrders(req: Request, res: Response): Promise<
   if (!roles.includes("rider")) {
     throw new HttpError(403, "Riders only");
   }
+  if (!authUser?.available) {
+    res.status(200).json({ data: [] });
+    return;
+  }
 
   const orders = await OrderModel.find({
     status: { $in: ["ready", "ready_for_pickup"] },
     riderId: { $in: [null, ""] },
   })
+    .select("_id stallId stallName items.name items.quantity deliveryFee total distance status readyAt createdAt")
     .sort({ readyAt: 1, createdAt: 1 })
+    .limit(100)
     .lean();
   res.status(200).json({ data: orders });
 }
@@ -399,14 +574,22 @@ function actorFor(
     case "delivering":
       // Rider claims an unassigned ready order, or continues their own.
       if (roles.includes("rider") && order.riderId === userId) return "rider";
-      if (roles.includes("rider") && !order.riderId && order.status === "ready") return "rider-claim";
+      if (
+        roles.includes("rider") &&
+        !order.riderId &&
+        (order.status === "ready" || order.status === "ready_for_pickup")
+      ) return "rider-claim";
       return null;
     case "delivered":
       return roles.includes("rider") && order.riderId === userId ? "rider" : null;
     case "cancelled":
-      // Only the customer can cancel a pending order; vendor cancels accepted/preparing/ready.
-      if (order.userId === userId) return "customer";
-      if (roles.includes("vendor") && order.vendorId === userId) return "vendor";
+      // Customer may cancel before preparation starts; vendor may cancel later.
+      if (order.userId === userId && (order.status === "pending" || order.status === "accepted")) return "customer";
+      if (
+        roles.includes("vendor") &&
+        order.vendorId === userId &&
+        ["accepted", "preparing", "ready", "ready_for_pickup"].includes(order.status)
+      ) return "vendor";
       return null;
     default:
       return null;
@@ -424,6 +607,9 @@ export async function updateOrderStatus(req: Request, res: Response): Promise<vo
     throw new HttpError(400, "invalid status");
   }
   const next = status as OrderStatus;
+  if (typeof cancelledReason === "string" && cancelledReason.trim().length > MAX_TEXT_LENGTH) {
+    throw new HttpError(400, "Cancellation reason is too long");
+  }
 
   const order = await OrderModel.findById(id).lean();
   if (!order) throw new HttpError(404, "Order not found");
@@ -439,6 +625,9 @@ export async function updateOrderStatus(req: Request, res: Response): Promise<vo
 
   const authUser = await UserModel.findById(user.sub).lean();
   const roles = (authUser?.roles ?? []) as string[];
+  if (next === "delivering" && roles.includes("rider") && !authUser?.available) {
+    throw new HttpError(403, "Go online before accepting a delivery");
+  }
   const actor = actorFor(next, order, roles, user.sub);
   if (!actor) {
     throw new HttpError(403, "This status transition is not allowed");
@@ -446,7 +635,9 @@ export async function updateOrderStatus(req: Request, res: Response): Promise<vo
 
   const update: Record<string, unknown> = { status: next };
   if (next === "cancelled" || next === "rejected") {
-    update.cancelledReason = typeof cancelledReason === "string" ? cancelledReason : `Order ${next}`;
+    update.cancelledReason = typeof cancelledReason === "string" && cancelledReason.trim()
+      ? cancelledReason.trim()
+      : `Order ${next}`;
   }
   if (next === "delivering" && actor === "rider-claim") {
     update.riderId = user.sub;
@@ -501,8 +692,10 @@ export async function updateOrderStatus(req: Request, res: Response): Promise<vo
       await pushNotification({ userId: order.userId }, `Your order ${shortId} is on the way!`, "info", String(id));
     } else if (next === "delivered") {
       await pushNotification({ userId: order.userId }, `Your order ${shortId} was delivered`, "success", String(id));
+    } else if (next === "cancelled" && actor === "customer") {
+      await pushNotification({ vendorId: order.vendorId ?? null }, `Order ${shortId} was cancelled by the customer`, "warning", String(id));
     } else if (next === "cancelled" || next === "rejected") {
-      await pushNotification({ vendorId: order.vendorId ?? null }, `Order ${shortId} was ${next}`, "warning", String(id));
+      await pushNotification({ userId: order.userId }, `Your order ${shortId} was ${next}`, "warning", String(id));
     }
   } catch (err) {
     console.warn("[orders] notification push failed:", err);

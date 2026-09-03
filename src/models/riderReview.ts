@@ -14,6 +14,10 @@ const riderReviewSchema = new Schema(
 );
 
 riderReviewSchema.index({ riderId: 1, createdAt: -1 });
+riderReviewSchema.index(
+  { orderId: 1 },
+  { unique: true, partialFilterExpression: { orderId: { $type: "string" } } },
+);
 
 export type RiderReview = InferSchemaType<typeof riderReviewSchema>;
 export const RiderReviewModel = model("RiderReview", riderReviewSchema);

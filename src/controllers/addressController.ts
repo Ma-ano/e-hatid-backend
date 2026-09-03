@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { HttpError } from "../middlewares/errorHandler.js";
 import { UserModel } from "../models/user.js";
+import { randomUUID } from "node:crypto";
 
 interface AuthUser {
   sub: string;
@@ -33,7 +34,7 @@ interface AddressEntry {
 const MAX_ADDRESSES = 10;
 
 function newAddressId(): string {
-  return `addr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `addr-${randomUUID()}`;
 }
 
 function toList(raw: unknown): AddressEntry[] {
@@ -96,6 +97,9 @@ export async function createAddress(req: Request, res: Response): Promise<void> 
   const location = parseLocation(body);
   const deliveryInstructions =
     typeof body.deliveryInstructions === "string" ? body.deliveryInstructions.trim() : "";
+  if (deliveryInstructions.length > 500) {
+    throw new HttpError(400, "Delivery instructions are too long.");
+  }
   const wantsDefault = body.isDefault === true;
 
   const entry: AddressEntry = {
@@ -107,9 +111,8 @@ export async function createAddress(req: Request, res: Response): Promise<void> 
     isDefault: wantsDefault,
   };
 
-  // Atomic create (prompt1.md §30): one update that pushes the entry, clears
-  // every other default when this becomes default, and enforces the max-10 cap
-  // via a filter — a concurrent request can't slip past the count check.
+  // One pipeline update enforces the cap and preserves an existing default.
+  // The first address, or one explicitly requested as default, becomes default.
   const result = await UserModel.updateOne(
     {
       _id: user.sub,
@@ -119,10 +122,26 @@ export async function createAddress(req: Request, res: Response): Promise<void> 
       {
         $set: {
           addresses: {
-            $concatArrays: [
-              { $map: { input: "$addresses", as: "a", in: { $mergeObjects: ["$$a", { isDefault: false }] } } },
-              [entry],
-            ],
+            $let: {
+              vars: { current: { $ifNull: ["$addresses", []] } },
+              in: {
+                $concatArrays: [
+                  {
+                    $cond: [
+                      wantsDefault,
+                      { $map: { input: "$$current", as: "a", in: { $mergeObjects: ["$$a", { isDefault: false }] } } },
+                      "$$current",
+                    ],
+                  },
+                  [
+                    {
+                      ...entry,
+                      isDefault: { $or: [wantsDefault, { $eq: [{ $size: "$$current" }, 0] }] },
+                    },
+                  ],
+                ],
+              },
+            },
           },
         },
       },
@@ -140,17 +159,9 @@ export async function createAddress(req: Request, res: Response): Promise<void> 
     );
   }
 
-  // First address always becomes the default.
   const doc = await UserModel.findById(user.sub).lean();
   const list = doc ? toList(doc.addresses) : [];
   const saved = list.find((a) => a.id === entry.id);
-  if (saved && list.length > 0 && !list.some((a) => a.isDefault)) {
-    saved.isDefault = true;
-    await UserModel.updateOne(
-      { _id: user.sub, addresses: { $elemMatch: { id: entry.id } } },
-      { $set: { "addresses.$.isDefault": true } },
-    );
-  }
 
   res.status(201).json({ data: saved ?? entry });
 }
@@ -196,6 +207,9 @@ export async function updateAddress(req: Request, res: Response): Promise<void> 
         ? body.deliveryInstructions.trim()
         : ""
       : (current.deliveryInstructions ?? "");
+  if (deliveryInstructions.length > 500) {
+    throw new HttpError(400, "Delivery instructions are too long.");
+  }
 
   const merged: AddressEntry = {
     ...current,
@@ -207,10 +221,12 @@ export async function updateAddress(req: Request, res: Response): Promise<void> 
     isDefault: current.isDefault, // default changes go through setDefaultAddress
   };
 
-  await UserModel.findByIdAndUpdate(
-    user.sub,
-    { $set: { [`addresses.${index}`]: merged } },
+  const result = await UserModel.updateOne(
+    { _id: user.sub, addresses: { $elemMatch: { id: addrId } } },
+    { $set: { "addresses.$[address]": merged } },
+    { arrayFilters: [{ "address.id": addrId }] },
   );
+  if (result.matchedCount === 0) throw new HttpError(404, "Address not found");
 
   const updatedDoc = await UserModel.findById(user.sub).lean();
   const updated = toList(updatedDoc?.addresses).find((a) => a.id === addrId);
@@ -230,12 +246,74 @@ export async function deleteAddress(req: Request, res: Response): Promise<void> 
   const removed = toList(doc.addresses).find((a) => a.id === addrId);
   if (!removed) throw new HttpError(404, "Address not found");
 
-  await UserModel.findByIdAndUpdate(user.sub, { $pull: { addresses: { id: addrId } } });
-
-  // If the deleted address was the default, promote the first remaining one.
-  if (removed.isDefault) {
-    await ensureSingleDefault(user.sub);
-  }
+  const result = await UserModel.updateOne(
+    { _id: user.sub, addresses: { $elemMatch: { id: addrId } } },
+    [
+      {
+        $set: {
+          addresses: {
+            $let: {
+              vars: {
+                remaining: {
+                  $filter: {
+                    input: { $ifNull: ["$addresses", []] },
+                    as: "address",
+                    cond: { $ne: ["$$address.id", addrId] },
+                  },
+                },
+                removedWasDefault: {
+                  $anyElementTrue: {
+                    $map: {
+                      input: { $ifNull: ["$addresses", []] },
+                      as: "address",
+                      in: {
+                        $and: [
+                          { $eq: ["$$address.id", addrId] },
+                          { $eq: ["$$address.isDefault", true] },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+              in: {
+                $cond: [
+                  "$$removedWasDefault",
+                  {
+                    $map: {
+                      input: "$$remaining",
+                      as: "address",
+                      in: {
+                        $mergeObjects: [
+                          "$$address",
+                          {
+                            isDefault: {
+                              $eq: [
+                                "$$address.id",
+                                {
+                                  $getField: {
+                                    field: "id",
+                                    input: { $arrayElemAt: ["$$remaining", 0] },
+                                  },
+                                },
+                              ],
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                  "$$remaining",
+                ],
+              },
+            },
+          },
+        },
+      },
+    ],
+    { updatePipeline: true },
+  );
+  if (result.matchedCount === 0) throw new HttpError(404, "Address not found");
 
   res.status(200).json({ data: { success: true } });
 }
@@ -247,54 +325,29 @@ export async function setDefaultAddress(req: Request, res: Response): Promise<vo
   const { id } = (req.body ?? {}) as { id?: unknown };
   if (typeof id !== "string" || id === "") throw new HttpError(400, "id is required");
 
-  // Atomic default switch (prompt1.md §30): a single bulkWrite clears all
-  // defaults then flags the target — no interleaved request can observe zero
-  // or two defaults between the steps.
-  const result = await UserModel.bulkWrite([
-    {
-      updateOne: {
-        filter: { _id: user.sub },
-        update: { $set: { "addresses.$[elem].isDefault": false } },
-        arrayFilters: [{ "elem.isDefault": true }],
+  const result = await UserModel.updateOne(
+    { _id: user.sub, addresses: { $elemMatch: { id } } },
+    [
+      {
+        $set: {
+          addresses: {
+            $map: {
+              input: { $ifNull: ["$addresses", []] },
+              as: "address",
+              in: {
+                $mergeObjects: ["$$address", { isDefault: { $eq: ["$$address.id", id] } }],
+              },
+            },
+          },
+        },
       },
-    },
-    {
-      updateOne: {
-        filter: { _id: user.sub, addresses: { $elemMatch: { id } } },
-        update: { $set: { "addresses.$.isDefault": true } },
-      },
-    },
-  ]);
+    ],
+    { updatePipeline: true },
+  );
 
-  if (result.modifiedCount === 0) {
+  if (result.matchedCount === 0) {
     throw new HttpError(404, "Address not found");
   }
 
   res.status(200).json({ data: { success: true } });
-}
-
-/** Guarantee exactly one default exists (first address wins if none do). */
-async function ensureSingleDefault(userId: string): Promise<void> {
-  const doc = await UserModel.findById(userId).lean();
-  if (!doc) return;
-  const list = toList(doc.addresses);
-  if (list.length === 0 || list.some((a) => a.isDefault)) return;
-
-  const first = list[0];
-  if (!first) return;
-  await UserModel.bulkWrite([
-    {
-      updateOne: {
-        filter: { _id: userId },
-        update: { $set: { "addresses.$[elem].isDefault": false } },
-        arrayFilters: [{ "elem.isDefault": true }],
-      },
-    },
-    {
-      updateOne: {
-        filter: { _id: userId, addresses: { $elemMatch: { id: first.id } } },
-        update: { $set: { "addresses.$.isDefault": true } },
-      },
-    },
-  ]);
 }

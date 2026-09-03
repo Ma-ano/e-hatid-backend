@@ -18,6 +18,7 @@ const otpRequestSchema = new Schema(
 otpRequestSchema.index({ email: 1, createdAt: -1 });
 otpRequestSchema.index({ ipAddress: 1, createdAt: -1 });
 otpRequestSchema.index({ userId: 1, isUsed: 1, createdAt: -1 });
+otpRequestSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 24 * 60 * 60 });
 
 export type OtpRequest = InferSchemaType<typeof otpRequestSchema>;
 export const OtpRequestModel = model("OtpRequest", otpRequestSchema);
